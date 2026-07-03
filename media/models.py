@@ -20,11 +20,10 @@ class MediaCreatorGroup(Main):
     on them, even if they're not Superadmin/Admin.
     Only Superadmin/Admin can manage this setting.
     """
-    department = models.ForeignKey(
+    department = models.OneToOneField(
         'authentication.Department',
         on_delete=models.CASCADE,
         related_name='media_creator_permissions',
-        unique=True,
     )
 
     class Meta:
@@ -248,3 +247,4 @@ class MediaAsset(Main):
         if self.width and self.height:
             return f"{self.width}x{self.height}"
         return ""
+
