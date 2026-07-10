@@ -1,24 +1,42 @@
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from contacts.models import Contact, ImportBatch, ContactLog, ContactRemark, ContactDocument
-from contacts.serializers import ContactSerializer, ImportBatchSerializer, ContactLogSerializer, ContactRemarkSerializer, ContactDocumentSerializer
+from django.db.models import Prefetch
+from contacts.models import (
+    Contact,
+    ImportBatch,
+    ContactLog,
+    ContactRemark,
+    ContactDocument,
+)
+from contacts.serializers import (
+    ContactListSerializer,
+    ContactSerializer,
+    ImportBatchSerializer,
+    ContactLogSerializer,
+    ContactRemarkSerializer,
+    ContactDocumentSerializer,
+)
+from crm.models import CRM
 
 
 class ImportBatchViewSet(viewsets.ModelViewSet):
     """List, retrieve, and delete import batches."""
+
     queryset = ImportBatch.objects.all()
     serializer_class = ImportBatchSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def perform_destroy(self, instance):
         from django.db import connection
-        
+
         # Use Raw SQL to bypass Django's extremely slow object collector for 50k+ rows.
         # The database-level CASCADE will still handle deleting related CRM deals if constraints exist.
         with connection.cursor() as cursor:
-            cursor.execute("DELETE FROM contacts_contact WHERE import_batch_id = %s", [instance.id])
-            
+            cursor.execute(
+                "DELETE FROM contacts_contact WHERE import_batch_id = %s", [instance.id]
+            )
+
         # Delete the batch itself
         instance.delete()
 
@@ -27,11 +45,24 @@ class ContactViewSet(viewsets.ModelViewSet):
     serializer_class = ContactSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [filters.SearchFilter]
-    search_fields = ['name', 'email', 'phone', 'contact_id']
+    search_fields = ["name", "email", "phone", "contact_id"]
+
+    def get_serializer_class(self):
+        if self.action == "list":
+            return ContactListSerializer
+        return ContactSerializer
 
     def get_queryset(self):
         qs = Contact.objects.all()
-        batch_id = self.request.query_params.get('batch')
+        qs = qs.select_related("import_batch")
+        if self.action in ("retrieve", "update", "partial_update", "destroy"):
+            qs = qs.prefetch_related(
+                Prefetch(
+                    "crm_pipelines",
+                    queryset=CRM.objects.select_related("pipeline", "stage"),
+                )
+            )
+        batch_id = self.request.query_params.get("batch")
         if batch_id:
             qs = qs.filter(import_batch_id=batch_id)
         return qs
@@ -42,36 +73,49 @@ class ContactViewSet(viewsets.ModelViewSet):
         # If the batch is now empty, delete it too
         if batch and not batch.contacts.exists():
             batch.delete()
-            
-    @action(detail=False, methods=['post'], url_path='bulk-create')
+
+    @action(detail=False, methods=["post"], url_path="bulk-create")
     def bulk_create(self, request):
         data = request.data
         if not isinstance(data, list):
-            return Response({"success": False, "message": "Expected a list of contacts"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"success": False, "message": "Expected a list of contacts"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        batch_name = request.query_params.get('batch_name') or 'Unnamed Import'
-        batch_id = request.query_params.get('batch_id')
+        batch_name = request.query_params.get("batch_name") or "Unnamed Import"
+        batch_id = request.query_params.get("batch_id")
 
         serializer = self.get_serializer(data=data, many=True)
         if not serializer.is_valid():
-            return Response({"success": False, "message": "Validation failed", "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {
+                    "success": False,
+                    "message": "Validation failed",
+                    "errors": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Get or Create the import batch
         if batch_id:
             try:
                 batch = ImportBatch.objects.get(id=batch_id)
             except (ImportBatch.DoesNotExist, ValidationError):
-                return Response({"success": False, "message": "Invalid batch_id provided"}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {"success": False, "message": "Invalid batch_id provided"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         else:
             batch = ImportBatch.objects.create(name=batch_name)
 
-        last_contact = Contact.objects.order_by('created_at').last()
+        last_contact = Contact.objects.order_by("created_at").last()
         next_id_num = 1001
         if last_contact:
             try:
                 # Get the numeric part of the last contact_id
                 # Handles cases like CON-1001, CON-1002, etc.
-                parts = last_contact.contact_id.split('-')
+                parts = last_contact.contact_id.split("-")
                 if len(parts) > 1 and parts[1].isdigit():
                     next_id_num = int(parts[1]) + 1
             except (IndexError, ValueError):
@@ -80,7 +124,7 @@ class ContactViewSet(viewsets.ModelViewSet):
         contact_objects = []
         for item_data in serializer.validated_data:
             contact = Contact(**item_data)
-            contact.contact_id = f'CON-{next_id_num}'
+            contact.contact_id = f"CON-{next_id_num}"
             contact.import_batch = batch
             contact.source = batch.name
             next_id_num += 1
@@ -96,39 +140,49 @@ class ContactViewSet(viewsets.ModelViewSet):
             log_objects = [
                 ContactLog(
                     contact=c,
-                    activity_type='Imported',
+                    activity_type="Imported",
                     description=f"Contact imported from batch '{batch.name}'",
-                    user=request.user
-                ) for c in saved_contacts
+                    user=request.user,
+                )
+                for c in saved_contacts
             ]
             ContactLog.objects.bulk_create(log_objects, batch_size=1000)
 
-            return Response({
-                "success": True,
-                "message": f"Successfully imported {len(contact_objects)} contacts.",
-                "batch_id": str(batch.id),
-                "batch_name": batch.name,
-            }, status=status.HTTP_201_CREATED)
+            return Response(
+                {
+                    "success": True,
+                    "message": f"Successfully imported {len(contact_objects)} contacts.",
+                    "batch_id": str(batch.id),
+                    "batch_name": batch.name,
+                },
+                status=status.HTTP_201_CREATED,
+            )
         except Exception as e:
             # Only delete the batch if we just created it and it failed
             if not batch_id:
                 batch.delete()
-            return Response({"success": False, "message": f"Database error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(
+                {"success": False, "message": f"Database error: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class ContactLogViewSet(viewsets.ModelViewSet):
-    queryset = ContactLog.objects.all().select_related('contact', 'crm', 'user')
+    queryset = ContactLog.objects.all().select_related("contact", "crm", "user")
     serializer_class = ContactLogSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         qs = super().get_queryset()
-        contact_id = self.request.query_params.get('contact')
-        crm_id = self.request.query_params.get('crm')
+        contact_id = self.request.query_params.get("contact")
+        crm_id = self.request.query_params.get("crm")
 
         if crm_id and contact_id:
             from django.db.models import Q
-            qs = qs.filter(Q(crm_id=crm_id) | Q(contact_id=contact_id, crm_id__isnull=True))
+
+            qs = qs.filter(
+                Q(crm_id=crm_id) | Q(contact_id=contact_id, crm_id__isnull=True)
+            )
         elif contact_id:
             qs = qs.filter(contact_id=contact_id)
         elif crm_id:
@@ -142,18 +196,22 @@ class ContactLogViewSet(viewsets.ModelViewSet):
 
 class ContactRemarkViewSet(viewsets.ModelViewSet):
     """Viewset for contact remarks/updates"""
+
     queryset = ContactRemark.objects.all()
     serializer_class = ContactRemarkSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         qs = super().get_queryset()
-        contact_id = self.request.query_params.get('contact')
-        crm_id = self.request.query_params.get('crm')
+        contact_id = self.request.query_params.get("contact")
+        crm_id = self.request.query_params.get("crm")
 
         if crm_id and contact_id:
             from django.db.models import Q
-            qs = qs.filter(Q(crm_id=crm_id) | Q(contact_id=contact_id, crm_id__isnull=True))
+
+            qs = qs.filter(
+                Q(crm_id=crm_id) | Q(contact_id=contact_id, crm_id__isnull=True)
+            )
         elif contact_id:
             qs = qs.filter(contact_id=contact_id)
         elif crm_id:
@@ -168,21 +226,22 @@ class ContactRemarkViewSet(viewsets.ModelViewSet):
             contact=remark.contact,
             crm=remark.crm,
             user=remark.user,
-            activity_type='Remark Added',
-            description=f'Added an update: "{remark.text}"'
+            activity_type="Remark Added",
+            description=f'Added an update: "{remark.text}"',
         )
 
 
 class ContactDocumentViewSet(viewsets.ModelViewSet):
     """Upload and manage files attached to contacts."""
+
     serializer_class = ContactDocumentSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [filters.SearchFilter]
-    search_fields = ['file_name', 'description']
+    search_fields = ["file_name", "description"]
 
     def get_queryset(self):
-        qs = ContactDocument.objects.select_related('contact', 'uploaded_by')
-        contact_id = self.request.query_params.get('contact')
+        qs = ContactDocument.objects.select_related("contact", "uploaded_by")
+        contact_id = self.request.query_params.get("contact")
         if contact_id:
             qs = qs.filter(contact_id=contact_id)
         return qs
