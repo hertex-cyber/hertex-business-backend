@@ -61,21 +61,27 @@ class PipelineViewSet(viewsets.ModelViewSet):
         unassigned_deals = total_deals - assigned_deals
 
         # User load: count of deals per eligible user
-        eligible_users = User.objects.filter(
-            departments__in=pipeline.departments.all(), is_active=True
-        ).distinct()
-
-        user_loads = []
-        for user in eligible_users:
-            count = CRM.objects.filter(pipeline=pipeline, assigned_user=user).count()
-            user_loads.append(
-                {
-                    "id": str(user.id),
-                    "name": f"{user.first_name} {user.last_name}".strip() or user.email,
-                    "email": user.email,
-                    "deal_count": count,
-                }
+        eligible_users = (
+            User.objects.filter(
+                departments__in=pipeline.departments.all(), is_active=True
             )
+            .distinct()
+            .annotate(
+                deal_count=Count(
+                    "assigned_deals", filter=models.Q(assigned_deals__pipeline=pipeline)
+                )
+            )
+        )
+
+        user_loads = [
+            {
+                "id": str(user.id),
+                "name": f"{user.first_name} {user.last_name}".strip() or user.email,
+                "email": user.email,
+                "deal_count": user.deal_count,
+            }
+            for user in eligible_users
+        ]
 
         user_loads.sort(key=lambda u: u["deal_count"])
 
@@ -311,13 +317,13 @@ class CRMViewSet(viewsets.ModelViewSet):
             fields = [f.strip() for f in search_by.split(",") if f.strip() in allowed]
             if not fields:
                 fields = ["name"]
-            q = Q()
+            q = models.Q()
             if "name" in fields:
-                q |= Q(contact__name__icontains=search)
+                q |= models.Q(contact__name__icontains=search)
             if "email" in fields:
-                q |= Q(contact__email__icontains=search)
+                q |= models.Q(contact__email__icontains=search)
             if "phone" in fields:
-                q |= Q(contact__phone__icontains=search)
+                q |= models.Q(contact__phone__icontains=search)
             qs = qs.filter(q)
         return qs
 
@@ -380,6 +386,10 @@ class CRMViewSet(viewsets.ModelViewSet):
                 assigned_user = self.assign_round_robin(pipeline)
             elif pipeline.assignment_type == "least_loaded":
                 assigned_user = self.assign_least_loaded(pipeline)
+            elif pipeline.assignment_type == "single_user":
+                eligible = self.get_pipeline_users(pipeline)
+                if eligible.exists():
+                    assigned_user = self.assign_least_loaded(pipeline)
 
         crm = serializer.save(assigned_user=assigned_user)
 
