@@ -134,6 +134,13 @@ class Menu(Main):
             models.Index(fields=['type', 'is_active']),
             models.Index(fields=['section', 'order']),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['code'],
+                condition=models.Q(organization__isnull=True),
+                name='unique_system_menu_code'
+            )
+        ]
         ordering = ['section', 'order', 'name']
         verbose_name = 'Menu'
         verbose_name_plural = 'Menus'
