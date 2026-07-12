@@ -10,6 +10,7 @@ CONTACT_STATUS = (
     ("Customer", "Customer"),
     ("Inactive", "Inactive"),
     ("Retarget", "Retarget"),
+    ("Imports", "Imports"),
 )
 
 

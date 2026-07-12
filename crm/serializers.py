@@ -47,6 +47,7 @@ class PipelineSerializer(serializers.ModelSerializer):
             "departments",
             "department_ids",
             "assignment_type",
+            "pipeline_type",
             "mandatory_fields",
             "custom_fields_enabled",
             "created_at",

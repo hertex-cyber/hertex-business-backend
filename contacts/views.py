@@ -28,17 +28,32 @@ class ImportBatchViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def perform_destroy(self, instance):
-        from django.db import connection
-
-        # Use Raw SQL to bypass Django's extremely slow object collector for 50k+ rows.
-        # The database-level CASCADE will still handle deleting related CRM deals if constraints exist.
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "DELETE FROM contacts_contact WHERE import_batch_id = %s", [instance.id]
-            )
-
-        # Delete the batch itself
+        qs = Contact.objects.filter(import_batch=instance)
+        ids = list(qs.values_list("id", flat=True))
+        for i in range(0, len(ids), 500):
+            Contact.objects.filter(id__in=ids[i : i + 500]).delete()
         instance.delete()
+
+    @action(detail=True, methods=["post"], url_path="delete-chunk")
+    def delete_chunk(self, request, pk=None):
+        batch = self.get_object()
+        limit = int(request.data.get("limit", 1500))
+
+        total = Contact.objects.filter(import_batch=batch).count()
+        ids = list(
+            Contact.objects.filter(import_batch=batch)
+            .order_by("id")
+            .values_list("id", flat=True)[:limit]
+        )
+
+        Contact.objects.filter(id__in=ids).delete()
+
+        remaining = Contact.objects.filter(import_batch=batch).count()
+
+        if remaining == 0:
+            batch.delete()
+
+        return Response({"deleted": len(ids), "total": total, "remaining": remaining})
 
 
 class ContactViewSet(viewsets.ModelViewSet):
@@ -127,6 +142,8 @@ class ContactViewSet(viewsets.ModelViewSet):
             contact.contact_id = f"CON-{next_id_num}"
             contact.import_batch = batch
             contact.source = batch.name
+            if not item_data.get("status"):
+                contact.status = "Imports"
             next_id_num += 1
             contact_objects.append(contact)
 

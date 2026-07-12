@@ -8,6 +8,12 @@ CRM_PRIORITY_CHOICES = (
     ("High", "High"),
 )
 
+PIPELINE_TYPE_CHOICES = (
+    ("sales", "Sales"),
+    ("retarget", "Retarget"),
+    ("clients", "Clients"),
+)
+
 STAGE_COLOR_CHOICES = (
     ("blue", "Blue"),
     ("purple", "Purple"),
@@ -35,6 +41,9 @@ class Pipeline(Main):
     )
     assignment_type = models.CharField(
         max_length=20, choices=ASSIGNMENT_TYPE_CHOICES, default="manual"
+    )
+    pipeline_type = models.CharField(
+        max_length=20, choices=PIPELINE_TYPE_CHOICES, default="sales"
     )
     mandatory_fields = models.JSONField(default=list, blank=True)
     custom_fields_enabled = models.BooleanField(default=False)

@@ -456,6 +456,8 @@ class CRMViewSet(viewsets.ModelViewSet):
     def bulk_add_from_batch(self, request):
         batch_id = request.data.get("batch_id")
         pipeline_id = request.data.get("pipeline_id")
+        offset = int(request.data.get("offset", 0))
+        limit = int(request.data.get("limit", 0))
 
         if not batch_id or not pipeline_id:
             return Response(
@@ -466,7 +468,6 @@ class CRMViewSet(viewsets.ModelViewSet):
         try:
             from contacts.models import Contact
 
-            # Get first stage of the pipeline
             first_stage = (
                 Stage.objects.filter(pipeline_id=pipeline_id).order_by("order").first()
             )
@@ -483,221 +484,33 @@ class CRMViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-            contacts = Contact.objects.filter(import_batch_id=batch_id)
-            existing_ids = CRM.objects.filter(
-                pipeline_id=pipeline_id, contact__in=contacts
-            ).values_list("contact_id", flat=True)
+            base_qs = Contact.objects.filter(import_batch_id=batch_id).order_by("id")
+            all_ids = list(base_qs.values_list("id", flat=True))
+            total_count = len(all_ids)
 
-            new_contacts = contacts.exclude(id__in=existing_ids)
-
-            # Create deals efficiently without querying DB per deal
-            crm_entries = []
-
-            eligible_users = list(
-                User.objects.filter(
-                    departments__in=pipeline.departments.all(), is_active=True
-                ).distinct()
-            )
-
-            # Setup state for round robin
-            rr_index = 0
-            if pipeline.assignment_type == "round_robin" and eligible_users:
-                last_deal = (
-                    CRM.objects.filter(pipeline=pipeline, assigned_user__isnull=False)
-                    .order_by("-created_at")
-                    .first()
-                )
-                if last_deal and last_deal.assigned_user in eligible_users:
-                    rr_index = (
-                        eligible_users.index(last_deal.assigned_user) + 1
-                    ) % len(eligible_users)
-
-            # Setup state for least loaded
-            ll_loads = {}
-            if pipeline.assignment_type == "least_loaded" and eligible_users:
-                ll_loads = {user: 0 for user in eligible_users}
-                counts = (
-                    CRM.objects.filter(
-                        pipeline=pipeline, assigned_user__in=eligible_users
-                    )
-                    .values("assigned_user")
-                    .annotate(c=Count("id"))
-                )
-                for item in counts:
-                    user_obj = next(
-                        (u for u in eligible_users if u.id == item["assigned_user"]),
-                        None,
-                    )
-                    if user_obj:
-                        ll_loads[user_obj] = item["c"]
-
-            for contact in new_contacts:
-                assigned_user = None
-                if eligible_users:
-                    if pipeline.assignment_type == "round_robin":
-                        assigned_user = eligible_users[rr_index]
-                        rr_index = (rr_index + 1) % len(eligible_users)
-                    elif pipeline.assignment_type == "least_loaded":
-                        assigned_user = min(ll_loads, key=ll_loads.get)
-                        ll_loads[assigned_user] += 1
-
-                crm_entries.append(
-                    CRM(
-                        contact=contact,
-                        pipeline_id=pipeline_id,
-                        stage=first_stage,
-                        priority="Medium",
-                        assigned_user=assigned_user,
-                    )
-                )
-
-            CRM.objects.bulk_create(crm_entries, batch_size=1000)
-
-            # Create activity logs for bulk crm entries
-            from contacts.models import ContactLog
-
-            saved_crms = CRM.objects.filter(
-                pipeline_id=pipeline_id, contact__import_batch_id=batch_id
-            )
-            log_entries = []
-            for crm in saved_crms:
-                log_entries.append(
-                    ContactLog(
-                        contact=crm.contact,
-                        crm=crm,
-                        activity_type="Pipeline Added",
-                        description=f"Added to pipeline '{pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}'",
-                        user=request.user,
-                    )
-                )
-                if crm.assigned_user:
-                    log_entries.append(
-                        ContactLog(
-                            contact=crm.contact,
-                            crm=crm,
-                            activity_type="Assignment Changed",
-                            description=f"Assigned to user {crm.assigned_user.first_name} {crm.assigned_user.last_name}".strip()
-                            or crm.assigned_user.email,
-                            user=request.user,
-                        )
-                    )
-            ContactLog.objects.bulk_create(log_entries, batch_size=1000)
-
-            return Response(
-                {
-                    "message": f"Successfully added {len(crm_entries)} contacts.",
-                    "added_count": len(crm_entries),
-                }
-            )
-        except Exception as e:
-            return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-    @action(detail=False, methods=["post"], url_path="bulk-add-contacts")
-    def bulk_add_contacts(self, request):
-        pipeline_id = request.data.get("pipeline_id")
-        contact_ids = request.data.get("contact_ids", [])
-        source_pipeline = request.data.get("source_pipeline")
-
-        if not pipeline_id or not contact_ids:
-            return Response(
-                {"error": "pipeline_id and contact_ids list are required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            from contacts.models import Contact
-
-            first_stage = (
-                Stage.objects.filter(pipeline_id=pipeline_id).order_by("order").first()
-            )
-
-            pipeline = Pipeline.objects.get(id=pipeline_id)
-            if (
-                request.user.role == "Staff"
-                and not pipeline.departments.filter(
-                    id__in=request.user.departments.all()
-                ).exists()
-            ):
-                return Response(
-                    {"error": "You do not have access to this pipeline."},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
-
-            if source_pipeline:
-                # MOVE existing deals from source pipeline to new pipeline
-                moved_count = CRM.objects.filter(
-                    pipeline_id=source_pipeline, contact_id__in=contact_ids
-                ).update(pipeline_id=pipeline_id, stage=first_stage, priority="High")
-
-                # Update contact statuses to Retarget
-                Contact.objects.filter(id__in=contact_ids).update(status="Retarget")
-
-                # Activity logs
-                from contacts.models import ContactLog
-
-                moved_deals = CRM.objects.filter(
-                    pipeline_id=pipeline_id, contact_id__in=contact_ids
-                )
-                log_entries = []
-                for crm in moved_deals:
-                    log_entries.append(
-                        ContactLog(
-                            contact=crm.contact,
-                            crm=crm,
-                            activity_type="Pipeline Changed",
-                            description=f"Moved to retarget pipeline '{pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}'",
-                            user=request.user,
-                        )
-                    )
-                ContactLog.objects.bulk_create(log_entries, batch_size=1000)
-
-                return Response(
-                    {
-                        "message": f"Successfully moved {moved_count} deals to retarget pipeline.",
-                        "moved_count": moved_count,
-                    }
-                )
-                moved_count = source_deals.count()
-
-                source_deals.update(
-                    pipeline_id=pipeline_id, stage=first_stage, priority="Medium"
-                )
-
-                # Update contact statuses to Retarget
-                Contact.objects.filter(id__in=contact_ids).update(status="Retarget")
-
-                # Activity logs
-                from contacts.models import ContactLog
-
-                log_entries = []
-                for crm in source_deals:
-                    log_entries.append(
-                        ContactLog(
-                            contact=crm.contact,
-                            crm=crm,
-                            activity_type="Pipeline Changed",
-                            description=f"Moved to retarget pipeline '{pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}'",
-                            user=request.user,
-                        )
-                    )
-                ContactLog.objects.bulk_create(log_entries, batch_size=1000)
-
-                return Response(
-                    {
-                        "message": f"Successfully moved {moved_count} deals to retarget pipeline.",
-                        "moved_count": moved_count,
-                    }
-                )
+            # If offset/limit provided, only process that slice
+            if limit > 0:
+                chunk_ids = all_ids[offset : offset + limit]
             else:
-                # Legacy: create new CRM entries (copy)
-                contacts = Contact.objects.filter(id__in=contact_ids)
-                existing_ids = CRM.objects.filter(
-                    pipeline_id=pipeline_id, contact__in=contacts
-                ).values_list("contact_id", flat=True)
+                chunk_ids = all_ids
 
-                new_contacts = contacts.exclude(id__in=existing_ids)
+            total_added = 0
+            CHUNK_SIZE = 1500
+
+            for i in range(0, len(chunk_ids), CHUNK_SIZE):
+                batch_ids = chunk_ids[i : i + CHUNK_SIZE]
+
+                existing = set(
+                    CRM.objects.filter(
+                        pipeline_id=pipeline_id, contact_id__in=batch_ids
+                    ).values_list("contact_id", flat=True)
+                )
+
+                new_chunk_ids = [cid for cid in batch_ids if cid not in existing]
+                if not new_chunk_ids:
+                    continue
+
+                new_contacts = list(Contact.objects.filter(id__in=new_chunk_ids))
 
                 eligible_users = list(
                     User.objects.filter(
@@ -764,15 +577,225 @@ class CRMViewSet(viewsets.ModelViewSet):
 
                 CRM.objects.bulk_create(crm_entries, batch_size=1000)
 
-                Contact.objects.filter(id__in=[c.id for c in new_contacts]).update(
-                    status="Retarget"
+                Contact.objects.filter(id__in=new_chunk_ids).update(status="Lead")
+
+                from contacts.models import ContactLog
+
+                saved_crms = CRM.objects.filter(
+                    pipeline_id=pipeline_id, contact_id__in=new_chunk_ids
+                )
+                log_entries = []
+                for crm in saved_crms:
+                    log_entries.append(
+                        ContactLog(
+                            contact=crm.contact,
+                            crm=crm,
+                            activity_type="Pipeline Added",
+                            description=f"Added to pipeline '{pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}'",
+                            user=request.user,
+                        )
+                    )
+                    if crm.assigned_user:
+                        log_entries.append(
+                            ContactLog(
+                                contact=crm.contact,
+                                crm=crm,
+                                activity_type="Assignment Changed",
+                                description=f"Assigned to user {crm.assigned_user.first_name} {crm.assigned_user.last_name}".strip()
+                                or crm.assigned_user.email,
+                                user=request.user,
+                            )
+                        )
+                ContactLog.objects.bulk_create(log_entries, batch_size=1000)
+
+                total_added += len(crm_entries)
+
+            return Response(
+                {
+                    "message": f"Added {total_added} contacts.",
+                    "added_count": total_added,
+                    "total_count": total_count,
+                }
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=["post"], url_path="bulk-add-contacts")
+    def bulk_add_contacts(self, request):
+        pipeline_id = request.data.get("pipeline_id")
+        contact_ids = request.data.get("contact_ids", [])
+        source_pipeline = request.data.get("source_pipeline")
+
+        if not pipeline_id or not contact_ids:
+            return Response(
+                {"error": "pipeline_id and contact_ids list are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            import time
+            from django.db import connection
+
+            _t0 = time.time()
+            _q0 = len(connection.queries)
+            from contacts.models import Contact
+
+            first_stage = (
+                Stage.objects.filter(pipeline_id=pipeline_id).order_by("order").first()
+            )
+
+            pipeline = Pipeline.objects.get(id=pipeline_id)
+            if (
+                request.user.role == "Staff"
+                and not pipeline.departments.filter(
+                    id__in=request.user.departments.all()
+                ).exists()
+            ):
+                return Response(
+                    {"error": "You do not have access to this pipeline."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            if source_pipeline:
+                # MOVE existing deals from source pipeline to new pipeline
+                moved_count = CRM.objects.filter(
+                    pipeline_id=source_pipeline, contact_id__in=contact_ids
+                ).update(pipeline_id=pipeline_id, stage=first_stage, priority="High")
+
+                # Update contact statuses to Retarget
+                Contact.objects.filter(id__in=contact_ids).update(status="Retarget")
+
+                # Activity logs
+                from contacts.models import ContactLog
+
+                moved_deals = CRM.objects.filter(
+                    pipeline_id=pipeline_id, contact_id__in=contact_ids
+                )
+                log_entries = []
+                for crm in moved_deals:
+                    log_entries.append(
+                        ContactLog(
+                            contact=crm.contact,
+                            crm=crm,
+                            activity_type="Pipeline Changed",
+                            description=f"Moved to retarget pipeline '{pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}'",
+                            user=request.user,
+                        )
+                    )
+                ContactLog.objects.bulk_create(log_entries, batch_size=1000)
+
+                print(
+                    f"[TIMING] source_pipeline branch: {time.time() - _t0:.3f}s | queries={len(connection.queries) - _q0} | contacts={len(contact_ids)}"
+                )
+                return Response(
+                    {
+                        "message": f"Successfully moved {moved_count} deals to retarget pipeline.",
+                        "moved_count": moved_count,
+                    }
+                )
+            else:
+                # Legacy: create new CRM entries (copy)
+                contact_ids_list = list(contact_ids)
+                existing_ids = set(
+                    CRM.objects.filter(
+                        pipeline_id=pipeline_id, contact_id__in=contact_ids_list
+                    ).values_list("contact_id", flat=True)
+                )
+
+                new_contact_ids = [
+                    cid for cid in contact_ids_list if cid not in existing_ids
+                ]
+                new_contacts = list(Contact.objects.filter(id__in=new_contact_ids))
+                print(
+                    f"[STAGE] after fetch contacts: queries={len(connection.queries) - _q0}"
+                )
+
+                eligible_users = list(
+                    User.objects.filter(
+                        departments__in=pipeline.departments.all(), is_active=True
+                    ).distinct()
+                )
+                print(
+                    f"[STAGE] after eligible_users: queries={len(connection.queries) - _q0}"
+                )
+
+                rr_index = 0
+                if pipeline.assignment_type == "round_robin" and eligible_users:
+                    last_deal = (
+                        CRM.objects.filter(
+                            pipeline=pipeline, assigned_user__isnull=False
+                        )
+                        .order_by("-created_at")
+                        .first()
+                    )
+                    if last_deal and last_deal.assigned_user in eligible_users:
+                        rr_index = (
+                            eligible_users.index(last_deal.assigned_user) + 1
+                        ) % len(eligible_users)
+                print(
+                    f"[STAGE] after round_robin: queries={len(connection.queries) - _q0}"
+                )
+
+                ll_loads = {}
+                if pipeline.assignment_type == "least_loaded" and eligible_users:
+                    ll_loads = {user: 0 for user in eligible_users}
+                    counts = (
+                        CRM.objects.filter(
+                            pipeline=pipeline, assigned_user__in=eligible_users
+                        )
+                        .values("assigned_user")
+                        .annotate(c=Count("id"))
+                    )
+                    for item in counts:
+                        user_obj = next(
+                            (
+                                u
+                                for u in eligible_users
+                                if u.id == item["assigned_user"]
+                            ),
+                            None,
+                        )
+                        if user_obj:
+                            ll_loads[user_obj] = item["c"]
+
+                crm_entries = []
+                for contact in new_contacts:
+                    assigned_user = None
+                    if eligible_users:
+                        if pipeline.assignment_type == "round_robin":
+                            assigned_user = eligible_users[rr_index]
+                            rr_index = (rr_index + 1) % len(eligible_users)
+                        elif pipeline.assignment_type == "least_loaded":
+                            assigned_user = min(ll_loads, key=ll_loads.get)
+                            ll_loads[assigned_user] += 1
+
+                    crm_entries.append(
+                        CRM(
+                            contact=contact,
+                            pipeline_id=pipeline_id,
+                            stage=first_stage,
+                            priority="Medium",
+                            assigned_user=assigned_user,
+                        )
+                    )
+
+                CRM.objects.bulk_create(crm_entries, batch_size=1000)
+                print(
+                    f"[STAGE] after bulk_create CRM: queries={len(connection.queries) - _q0}"
+                )
+
+                Contact.objects.filter(id__in=new_contact_ids).update(status="Lead")
+                print(
+                    f"[STAGE] after Contact update: queries={len(connection.queries) - _q0}"
                 )
 
                 from contacts.models import ContactLog
 
                 saved_crms = CRM.objects.filter(
-                    pipeline_id=pipeline_id, contact__in=[c.id for c in new_contacts]
-                )
+                    pipeline_id=pipeline_id, contact_id__in=new_contact_ids
+                ).select_related("contact", "assigned_user")
                 log_entries = []
                 for crm in saved_crms:
                     log_entries.append(
@@ -795,8 +818,36 @@ class CRMViewSet(viewsets.ModelViewSet):
                                 user=request.user,
                             )
                         )
+                print(
+                    f"[STAGE] after saved_crms loop: queries={len(connection.queries) - _q0}"
+                )
                 ContactLog.objects.bulk_create(log_entries, batch_size=1000)
+                print(
+                    f"[STAGE] after log bulk_create: queries={len(connection.queries) - _q0}"
+                )
 
+                _elapsed = time.time() - _t0
+                _qtotal = len(connection.queries) - _q0
+                print(
+                    f"[TIMING] else branch: {_elapsed:.3f}s | queries={_qtotal} | new_ids={len(new_contact_ids)} | crm_entries={len(crm_entries)} | eligible_users={len(eligible_users)}"
+                )
+                _all_queries = connection.queries[-_qtotal:]
+                _select_contacts = [
+                    q
+                    for q in _all_queries
+                    if 'FROM "contacts_contact"' in q.get("sql", "")
+                ]
+                _select_crm = [
+                    q for q in _all_queries if 'FROM "crm_crm"' in q.get("sql", "")
+                ]
+                _select_users = [
+                    q
+                    for q in _all_queries
+                    if 'FROM "authentication_user"' in q.get("sql", "")
+                ]
+                print(
+                    f"[TIMING]   contact SELECTs={len(_select_contacts)} | crm SELECTs={len(_select_crm)} | user SELECTs={len(_select_users)}"
+                )
                 return Response(
                     {
                         "message": f"Successfully added {len(crm_entries)} contacts to the pipeline.",
@@ -804,6 +855,10 @@ class CRMViewSet(viewsets.ModelViewSet):
                     }
                 )
         except Exception as e:
+            import traceback
+
+            print(f"[TIMING] EXCEPTION at {time.time() - _t0:.3f}s: {e}")
+            traceback.print_exc()
             return Response(
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
