@@ -33,7 +33,7 @@ DEBUG = True
 
 ALLOWED_HOSTS = os.getenv(
     "ALLOWED_HOSTS",
-    "localhost,127.0.0.1,hertex-business-backend-production.up.railway.app",
+    "localhost,127.0.0.1,hertex-business-backend-production.up.railway.app,mqya9wigzxno-production-ge4vahj7.us-central1.suga.run",
 ).split(",")
 
 
