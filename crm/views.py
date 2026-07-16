@@ -670,7 +670,7 @@ class CRMViewSet(viewsets.ModelViewSet):
                 # Activity logs
                 from contacts.models import ContactLog
 
-                moved_deals = CRM.objects.filter(
+                moved_deals = CRM.objects.select_related("contact").filter(
                     pipeline_id=pipeline_id, contact_id__in=contact_ids
                 )
                 log_entries = []
