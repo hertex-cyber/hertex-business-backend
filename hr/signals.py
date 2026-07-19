@@ -97,13 +97,16 @@ def create_leave_balances(sender, instance, created, **kwargs):
     """
     if created and (instance.status == 'ACTIVE' or instance.status == 'ONBOARDING'):
         from hr.models import LeaveType
-        current_year = datetime.now().year
-        financial_year = f"{current_year-1}-{current_year}"
+        today = datetime.now()
+        if today.month >= 4:
+            financial_year = f"{today.year}-{today.year + 1}"
+        else:
+            financial_year = f"{today.year - 1}-{today.year}"
         
         leave_types = LeaveType.objects.filter(is_active=True)
         
         for leave_type in leave_types:
-            EmployeeLeaveBalance.objects.get_or_create(
+            balance, created = EmployeeLeaveBalance.objects.get_or_create(
                 employee=instance,
                 leave_type=leave_type,
                 financial_year=financial_year,
@@ -112,6 +115,9 @@ def create_leave_balances(sender, instance, created, **kwargs):
                     'accrued_days': 0,
                 }
             )
+            if created:
+                balance.current_balance = balance.calculate_balance()
+                balance.save(update_fields=['current_balance'])
 
 
 @receiver(post_save, sender=LeaveApplication)
@@ -121,10 +127,15 @@ def update_leave_balance_on_approval(sender, instance, created, **kwargs):
     """
     if instance.approval_status == 'APPROVED':
         try:
+            applied_date = instance.applied_date
+            if applied_date.month >= 4:
+                financial_year = f"{applied_date.year}-{applied_date.year + 1}"
+            else:
+                financial_year = f"{applied_date.year - 1}-{applied_date.year}"
             leave_balance = EmployeeLeaveBalance.objects.get(
                 employee=instance.employee,
                 leave_type=instance.leave_type,
-                financial_year=instance.applied_date.strftime("%Y-%Y" if instance.applied_date.month < 4 else "%Y-%Y")
+                financial_year=financial_year
             )
             leave_balance.used_days += instance.number_of_days
             leave_balance.calculate_balance()

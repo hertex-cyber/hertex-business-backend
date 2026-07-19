@@ -15,6 +15,8 @@ USER_ROLE = (
     ('Manager', "Manager"),
     ('Staff', "Staff"),
     ("Vendor", "Vendor"),
+    ("Finance", "Finance"),
+    ("Payroll Executive", "Payroll Executive"),
     ("User", "User"),
     ("Others", "Others"),
 )
@@ -195,6 +197,8 @@ class User(AbstractBaseUser, PermissionsMixin, Main):
                 'Manager': 'MGR',
                 'Staff': 'STF',
                 'Vendor': 'VDR',
+                'Finance': 'FIN',
+                'Payroll Executive': 'PAY',
                 'User': 'USR',
                 'Others': 'OTH',
             }
