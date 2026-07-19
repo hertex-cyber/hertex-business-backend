@@ -1,4 +1,4 @@
-from rest_framework import viewsets, status, filters
+from rest_framework import serializers, viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -179,9 +179,9 @@ class JobRequisitionViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         try:
             employee = self.request.user.employee
-            serializer.save(requested_by=employee)
         except Exception:
-            raise
+            raise serializers.ValidationError({"requested_by": "No employee profile found for your account"})
+        serializer.save(requested_by=employee)
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsHRStaff])
     def approve(self, request, pk=None):

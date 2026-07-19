@@ -2,12 +2,17 @@ from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import PermissionDenied
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q, Count, Sum, Avg
 from django.utils import timezone
 from django.http import HttpResponse
 from datetime import datetime, timedelta, date
 from decimal import Decimal
+import os
+import mimetypes
+import requests
+import cloudinary.utils
 
 from authentication.models import Department
 from hr.models import (
@@ -72,7 +77,7 @@ from authentication.audit_logger import log_audit
 
 class SalaryRevisionViewSet(viewsets.ModelViewSet):
     """ViewSet for Salary Revision management."""
-    permission_classes = [IsAuthenticated, IsHRStaff]
+    permission_classes = [IsAuthenticated, IsManagerOrHR]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['employee', 'status', 'revision_type', 'effective_month', 'effective_year', 'is_processed']
     search_fields = ['employee__employee_id', 'employee__first_name', 'employee__last_name']
@@ -83,18 +88,38 @@ class SalaryRevisionViewSet(viewsets.ModelViewSet):
         return SalaryRevisionSerializer
 
     def get_queryset(self):
-        return SalaryRevision.objects.select_related(
+        user = self.request.user
+        base_qs = SalaryRevision.objects.select_related(
             'employee', 'recommended_by', 'approved_by_manager', 'approved_by_hr'
-        ).all()
+        )
+        if user.role in ['Superadmin', 'Admin', 'Payroll Executive']:
+            return base_qs.all()
+        if user.role == 'Manager':
+            try:
+                employee = user.employee
+                return base_qs.filter(employee__reporting_manager=employee)
+            except:
+                return base_qs.none()
+        if user.role == 'Finance':
+            return base_qs.all()
+        return base_qs.none()
 
     def perform_create(self, serializer):
-        revision = serializer.save()
-        # Calculate percentage increase automatically
+        user = self.request.user
+        if user.role not in ['Superadmin', 'Admin']:
+            raise PermissionDenied('Only HR Admin can create salary revisions')
+        revision = serializer.save(status='PENDING_MANAGER')
         if revision.previous_ctc and revision.revised_ctc:
             revision.percentage_increase = (
                 (revision.revised_ctc - revision.previous_ctc) / revision.previous_ctc * Decimal('100')
             ).quantize(Decimal('0.01'))
             revision.save()
+
+    def _is_manager_of_employee(self, revision):
+        try:
+            return self.request.user.employee == revision.employee.reporting_manager
+        except:
+            return False
 
     @action(detail=True, methods=['post'])
     def approve_manager(self, request, pk=None):
@@ -102,6 +127,8 @@ class SalaryRevisionViewSet(viewsets.ModelViewSet):
         revision = self.get_object()
         if revision.status != 'PENDING_MANAGER':
             return Response({'error': 'Revision is not pending manager approval'}, status=status.HTTP_400_BAD_REQUEST)
+        if request.user.role not in ['Superadmin', 'Admin'] and not self._is_manager_of_employee(revision):
+            return Response({'error': 'Only the employee\'s reporting manager can approve at this stage'}, status=status.HTTP_403_FORBIDDEN)
         revision.status = 'PENDING_HR'
         revision.approved_by_manager = request.user
         revision.save()
@@ -113,6 +140,8 @@ class SalaryRevisionViewSet(viewsets.ModelViewSet):
         revision = self.get_object()
         if revision.status != 'PENDING_HR':
             return Response({'error': 'Revision is not pending HR approval'}, status=status.HTTP_400_BAD_REQUEST)
+        if request.user.role not in ['Superadmin', 'Admin']:
+            return Response({'error': 'Only HR Admin can approve at this stage'}, status=status.HTTP_403_FORBIDDEN)
         revision.status = 'PENDING_FINANCE'
         revision.approved_by_hr = request.user
         revision.save()
@@ -124,19 +153,20 @@ class SalaryRevisionViewSet(viewsets.ModelViewSet):
         revision = self.get_object()
         if revision.status != 'PENDING_FINANCE':
             return Response({'error': 'Revision is not pending finance approval'}, status=status.HTTP_400_BAD_REQUEST)
+        if request.user.role not in ['Superadmin', 'Admin', 'Finance']:
+            return Response({'error': 'Only Finance can approve at this stage'}, status=status.HTTP_403_FORBIDDEN)
         revision.status = 'APPROVED'
         revision.approved_by_finance = request.user
         revision.approved_date = timezone.now()
         revision.save()
-        
-        # Update the employee's salary
+
         from hr.models import EmployeeSalary
         old_salary = EmployeeSalary.objects.filter(employee=revision.employee, is_active=True).order_by('-effective_from').first()
         if old_salary:
             old_salary.is_active = False
             old_salary.effective_to = date(revision.effective_year, revision.effective_month, 1) - timedelta(days=1)
             old_salary.save()
-        
+
         EmployeeSalary.objects.create(
             employee=revision.employee,
             salary_structure=old_salary.salary_structure if old_salary else None,
@@ -148,13 +178,15 @@ class SalaryRevisionViewSet(viewsets.ModelViewSet):
             previous_salary=old_salary,
             is_active=True,
         )
-        
+
         return Response({'status': 'Finance approved — salary updated'})
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         """Reject salary revision."""
         revision = self.get_object()
+        if request.user.role not in ['Superadmin', 'Admin', 'Finance'] and not self._is_manager_of_employee(revision):
+            return Response({'error': 'Not authorized to reject this revision'}, status=status.HTTP_403_FORBIDDEN)
         revision.status = 'REJECTED'
         revision.notes = request.data.get('reason', revision.notes or '')
         revision.save()
@@ -162,15 +194,22 @@ class SalaryRevisionViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def pending_approvals(self, request):
-        """Get revisions pending approval."""
-        revisions = self.get_queryset().filter(
-            status__in=['PENDING_MANAGER', 'PENDING_HR', 'PENDING_FINANCE']
-        )
-        page = self.paginate_queryset(revisions)
+        """Get revisions pending approval (role-filtered)."""
+        user = request.user
+        qs = self.get_queryset()
+        if user.role in ['Superadmin', 'Admin', 'Payroll Executive']:
+            qs = qs.filter(status__in=['PENDING_MANAGER', 'PENDING_HR', 'PENDING_FINANCE'])
+        elif user.role == 'Manager':
+            qs = qs.filter(status='PENDING_MANAGER')
+        elif user.role == 'Finance':
+            qs = qs.filter(status='PENDING_FINANCE')
+        else:
+            qs = qs.none()
+        page = self.paginate_queryset(qs)
         if page is not None:
             serializer = self.get_serializer(page, many=True)
             return self.get_paginated_response(serializer.data)
-        serializer = self.get_serializer(revisions, many=True)
+        serializer = self.get_serializer(qs, many=True)
         return Response(serializer.data)
 
 
@@ -825,6 +864,30 @@ class EmployeeDocumentViewSet(viewsets.ModelViewSet):
 
         return Response({'status': 'Document verified'}, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['get'])
+    def download(self, request, pk=None):
+        document = self.get_object()
+        name = document.document_file.name
+        ext = os.path.splitext(name)[1] or ''
+        content_type = mimetypes.guess_type(name)[0] or 'application/octet-stream'
+        filename = f"{document.document_type}_{document.employee.employee_id}{ext}"
+
+        download_url = cloudinary.utils.private_download_url(
+            name,
+            '',
+            type='upload',
+            resource_type='raw',
+            attachment=True,
+            expires_at=9999999999,
+        )
+        resp = requests.get(download_url, allow_redirects=True)
+        resp.raise_for_status()
+
+        response = HttpResponse(resp.content, content_type=content_type)
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Content-Length'] = len(resp.content)
+        return response
+
 
 # ============================================================================
 # ATTENDANCE & LEAVE VIEWSETS
@@ -859,11 +922,18 @@ class EmployeeLeaveBalanceViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['get'])
     def current_year(self, request):
-        """Get leave balances for current financial year"""
+        """Get leave balances for current financial year for the logged-in employee"""
         current_year = datetime.now().year
         financial_year = f"{current_year-1}-{current_year}"
         
-        balances = self.get_queryset().filter(financial_year=financial_year)
+        try:
+            employee = request.user.employee
+        except Exception:
+            return Response([])
+        
+        balances = EmployeeLeaveBalance.objects.filter(
+            employee=employee, financial_year=financial_year
+        ).select_related('leave_type')
         serializer = self.get_serializer(balances, many=True)
         return Response(serializer.data)
 
@@ -1078,6 +1148,16 @@ class AttendanceViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
+        qs = self._base_queryset(user)
+        month = self.request.query_params.get('date__month') if self.request else None
+        year = self.request.query_params.get('date__year') if self.request else None
+        if month and year:
+            qs = qs.filter(date__month=month, date__year=year)
+        return qs
+
+    def _base_queryset(self, user=None):
+        if user is None:
+            user = self.request.user
         if user.role in ['Superadmin', 'Admin']:
             return Attendance.objects.select_related('employee', 'regularized_by')
         elif user.role == 'Manager':
@@ -1138,7 +1218,7 @@ class AttendanceViewSet(viewsets.ModelViewSet):
     def today(self, request):
         """Get attendance for today"""
         today = timezone.now().date()
-        attendance = self.get_queryset().filter(date=today)
+        attendance = self._base_queryset().filter(date=today)
         serializer = self.get_serializer(attendance, many=True)
         return Response(serializer.data)
 
@@ -1154,14 +1234,14 @@ class AttendanceViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        attendance = self.get_queryset().filter(date__month=month, date__year=year)
+        attendance = self._base_queryset().filter(date__month=month, date__year=year)
         
         report_data = {
             'month': month,
             'year': year,
-            'total_days': attendance.values('employee').distinct().count(),
             'present_days': attendance.filter(status='PRESENT').count(),
             'absent_days': attendance.filter(status='ABSENT').count(),
+            'half_day_count': attendance.filter(status='HALF_DAY').count(),
             'wfh_days': attendance.filter(status='WFH').count(),
         }
 
