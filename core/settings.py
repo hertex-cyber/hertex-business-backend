@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     "media",
     "sales_task_manager",
     "inventory",
+    "event_calendar",
 ]
 
 MIDDLEWARE = [

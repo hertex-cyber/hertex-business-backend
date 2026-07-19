@@ -1,428 +1,251 @@
-# ByteHive Dynamic Menu System - Implementation Complete ✅
+# Menu System Implementation Report
 
-## Summary of Accomplishments
+## Overview
 
-### ✅ Phase 1: Backend Foundation (COMPLETED)
-
-All database models, migrations, and API endpoints are fully implemented and deployed:
-
-**Models Created:**
-
-- ✅ Organization (multi-tenant support)
-- ✅ Product (system modules)
-- ✅ OrgProductPurchase (product licensing)
-- ✅ Menu (system & custom menus)
-- ✅ MenuRole (role-based menu assignments)
-- ✅ User enhanced with organization FK
-
-**Migrations Applied:**
-
-- ✅ menus/migrations/0001_initial.py (all models)
-- ✅ authentication/migrations/0004_user_organization_alter_user_role.py
-- ✅ Database populated with 10 default system menus
-- ✅ 43 menu-role assignments created
-
-**API Endpoints Available:**
-
-- ✅ `GET /api/menus/my-menus/` - Get user's visible menus (core feature)
-- ✅ `GET /api/menus/` - List all menus (admin)
-- ✅ `POST /api/menus/` - Create custom menu
-- ✅ `PUT/PATCH /api/menus/{id}/` - Update menu
-- ✅ `DELETE /api/menus/{id}/` - Soft delete menu
-- ✅ `POST /api/menus/{id}/assign-role/` - Assign to role
-- ✅ `POST /api/menus/{id}/remove-role/` - Unassign from role
-- ✅ `GET/POST /api/organizations/` - Organization management
-- ✅ `GET /api/products/` - Product listing
-- ✅ `POST /api/organizations/{id}/assign-product/` - Assign product
-- ✅ `POST /api/organizations/{id}/revoke-product/` - Revoke product
-
-**Permission Classes:**
-
-- ✅ IsSuperadmin - Only superadmin users
-- ✅ IsOrgAdminOrSuperadmin - Org admins & superadmin
-- ✅ CanEditMenu - Object-level edit checks
-- ✅ CanDeleteMenu - Object-level delete checks
-
-**Admin Interface:**
-
-- ✅ MenuAdmin - Full Django admin support
-- ✅ MenuRoleAdmin - Role management
-- ✅ ProductAdmin - Product CRUD
-- ✅ OrganizationAdmin - Organization management
+The menu system is a **fully dynamic, database-driven sidebar navigation** with role-based access control (RBAC), product gating, multi-tenant organization scoping, and both system-level and custom menus. The backend (`crm_backend/menus/`) serves data via DRF endpoints; the frontend (`crm_frontend/`) consumes it via a React context provider.
 
 ---
 
-### ✅ Phase 2: Frontend Integration (COMPLETED)
+## Backend Architecture (`crm_backend/menus/`)
 
-Dynamic menu loading in the frontend with context-based state management:
+### Models (`models.py` — 6 models, 231 lines)
 
-**New Files Created:**
+| Model | Table | Purpose | Key Fields |
+|-------|-------|---------|------------|
+| `Organization` | `menus_organization` | Multi-tenant orgs | `name`, `owner` (FK User) |
+| `Product` | `menus_product` | Purchasable modules | `name`, `code`, `is_active` |
+| `OrgProductPurchase` | `menus_orgproductpurchase` | Product licensing per org | `organization`, `product`, `is_valid` (computed) |
+| **`Menu`** | `menus_menu` | Core menu item | `type` (SYSTEM/CUSTOM), `code`, `name`, `href`, `icon`, `section`, `order`, `description`, `is_active`, `created_by`, `organization`, `required_product` |
+| **`MenuRole`** | `menus_menurole` | Role-to-menu assignments | `menu`, `role` (6 choices), `organization` |
+| **`MenuUser`** | `menus_menuuser` | User-to-menu overrides | `menu`, `user` |
 
-- ✅ `src/utils/iconMapper.js` - Lucide icon mapper (30+ icons)
-- ✅ `src/context/MenuContext.jsx` - Enhanced MenuContext with loading/error states
-- ✅ `src/components/Sidebar.jsx` - Updated to use MenuContext dynamically
+**Constraints:**
+- `unique_together = (organization, code)` — menu code unique per org
+- `UniqueConstraint(code)` where `organization__isnull=True` — SYSTEM menu codes globally unique
+- `unique_together = (menu, role, organization)` — MenuRole per org context
+- Indexes on `(organization, is_active)`, `(type, is_active)`, `(section, order)`
+- UUID primary keys on all models
 
-**Updated Files:**
+**Model permission methods:**
+- `can_edit(user)` — SYSTEM: Superadmin only; CUSTOM: org Admin/Superadmin
+- `can_assign_user(user)` — SYSTEM: Superadmin/Admin; CUSTOM: same as `can_edit`
+- `can_delete(user)` — SYSTEM: Superadmin only; CUSTOM: creator or org Superadmin
 
-- ✅ `src/App.jsx` - Added MenuProvider wrapper
+### Serializers (`serializers.py` — 160 lines)
 
-**Features Implemented:**
+| Serializer | Purpose |
+|------------|---------|
+| `MenuListSerializer` | Minimal list output — includes `roles` as `SerializerMethodField` filtered by org context |
+| `MenuDetailSerializer` | Full detail with nested `roles`, `user_assignments`, creator/org/product names |
+| `MenuCreateUpdateSerializer` | Create/update — validates `code` (alphanumeric + underscores) and `href` (must start with `/`) |
+| `MenuMyMenusResponseSerializer` | Response shape: `{ sections: {...}, all_menus: [...] }` |
+| `MenuRoleSerializer` | MenuRole CRUD |
+| `MenuUserSerializer` | MenuUser with `user_email`, `user_name` read-only fields |
+| `AssignMenuToRoleSerializer` | Validates `role` is one of 6 valid roles |
+| `AssignMenuToUserSerializer` | Validates `user_id` exists |
+| `ProductSerializer` | Product CRUD |
+| `OrgProductPurchaseSerializer` | Purchase records with `is_valid` computed field |
+| `OrganizationSerializer` | Org with nested product purchases |
 
-- ✅ Dynamic menu loading from `/api/menus/my-menus/`
-- ✅ Menu grouping by sections
-- ✅ Dynamic icon rendering using Lucide icons
-- ✅ Loading state with spinner
-- ✅ Error handling with fallback UI
-- ✅ Role-based menu filtering
-- ✅ Organization-based menu filtering
-- ✅ Product-gated menu support
-- ✅ Active link highlighting
-- ✅ Smooth animations and transitions
+### Views / API Endpoints (`views.py` — 701 lines)
 
-**Design System Compliance:**
+**`MenuViewSet`** — Core CRUD + custom actions:
 
-- ✅ Industrial Dark aesthetic maintained
-- ✅ white/5 border styling
-- ✅ blue-500 accent colors
-- ✅ Smooth duration-200 transitions
-- ✅ Proper hover states
+| Method | URL | Description |
+|--------|-----|-------------|
+| `GET` | `/api/menus/` | List all menus (filtered by role/org) |
+| `POST` | `/api/menus/` | Create custom menu |
+| `GET` | `/api/menus/{id}/` | Menu detail |
+| `PUT/PATCH` | `/api/menus/{id}/` | Update menu |
+| `DELETE` | `/api/menus/{id}/` | Soft-delete (sets `is_active=False`) |
+| **`GET`** | **`/api/menus/my-menus/`** | **Main sidebar endpoint — returns pre-grouped, filtered menus** |
+| `POST` | `/api/menus/{id}/assign-role/` | Assign menu to role |
+| `POST` | `/api/menus/{id}/remove-role/` | Remove menu from role |
+| `POST` | `/api/menus/{id}/assign-user/` | Assign menu to individual user |
+| `POST` | `/api/menus/{id}/remove-user/` | Remove menu from user |
+| `GET/POST` | `/api/menus/user-assignments/` | Bulk get/set menu assignments per user |
+| `GET` | `/api/menus/user-effective-menus/` | Admin inspection: shows all menus with role-based/direct/effective flags |
 
----
+**`ProductViewSet`** — `GET /api/products/`, `GET /api/products/{id}/`
+**`OrganizationViewSet`** — Full CRUD on orgs + `assign-product`/`revoke-product` actions
 
-### ✅ Phase 3: Admin UI (COMPLETED)
-
-Comprehensive admin pages for managing the entire menu system:
-
-**New Admin Pages Created:**
-
-1. ✅ `src/modules/admin/pages/AdminMenus.jsx`
-   - List all menus with filters
-   - Search by name/code
-   - Filter by type (System/Custom)
-   - Sort by name/section/created
-   - Edit menus (for authorized users)
-   - Delete menus (soft delete)
-   - Responsive table view
-
-2. ✅ `src/modules/admin/pages/AdminMenuForm.jsx`
-   - Create new menus
-   - Edit existing menus
-   - Full form validation
-   - Icon selector dropdown
-   - Product requirement assignment
-   - Section and order management
-   - Type selection (Superadmin only)
-   - Form error handling
-
-3. ✅ `src/modules/admin/pages/AdminProducts.jsx`
-   - List all available products
-   - Search functionality
-   - Product status display
-   - Quick product reference
-
-4. ✅ `src/modules/admin/pages/AdminOrganizations.jsx`
-   - List all organizations
-   - View organization details
-   - Manage product assignments
-   - Revoke products
-   - Track purchase validity
-   - Expandable org cards
-
-**Features Per Page:**
-
-- ✅ Loading states
-- ✅ Error handling
-- ✅ Authorization checks
-- ✅ Responsive design
-- ✅ Inline editing where applicable
-- ✅ Batch operations ready
-- ✅ API error feedback
-
----
-
-### ✅ Phase 4: Testing & Documentation (IN PROGRESS)
-
-**Verification Checklist:**
-
-- ✅ Database migrations applied successfully
-- ✅ Default system menus created (10 menus)
-- ✅ Role assignments created (43 total)
-- ✅ API endpoints responding correctly
-- ✅ Frontend context loading menus
-- ✅ Sidebar rendering dynamically
-- ✅ Admin pages functional
-- 🔄 End-to-end testing (in progress)
-- 🔄 Integration tests (in progress)
-
----
-
-## Default System Menus Created
-
-| Code      | Name      | Section    | Icon            | Access Roles |
-| --------- | --------- | ---------- | --------------- | ------------ |
-| dashboard | Dashboard | Operations | LayoutDashboard | All          |
-| crm       | CRM       | Operations | Users           | All          |
-| docs      | Doc Tools | Operations | FileText        | All          |
-| inventory | Inventory | Operations | Box             | Staff+       |
-| hr        | HR        | Operations | Briefcase       | Manager+     |
-| accounts  | Accounts  | Operations | CreditCard      | Manager+     |
-| media     | Media     | Operations | Image           | All          |
-| lms       | LMS       | Operations | GraduationCap   | All          |
-| sales     | Sales     | Operations | TrendingUp      | Manager+     |
-| admin     | Admin     | Settings   | ShieldCheck     | Admin+       |
-
----
-
-## How to Use the Menu System
-
-### For End Users
-
-1. Login to the application
-2. Sidebar automatically loads menus based on their role
-3. Only visible menus appear in sidebar
-4. Menus are grouped by sections
-5. Click any menu to navigate
-
-### For Superadmins
-
-1. **Create System Menus**: Go to `/admin/menus` → Create Menu → Set type to "System"
-2. **Assign to Roles**: Use Django admin or API to create MenuRole entries
-3. **Gate by Product**: Set `required_product` to limit visibility to organizations
-4. **Manage Organizations**: Go to `/admin/organizations` to assign products
-
-### For Organization Admins
-
-1. **Create Custom Menus**: Go to `/admin/menus` → Create Menu → Type is "Custom"
-2. **Auto-scoped**: Custom menus automatically belong to their organization
-3. **Assign to Roles**: Create MenuRole with their organization context
-4. **Visibility**: Only their organization members see these menus
-
----
-
-## API Response Example
-
-**GET /api/menus/my-menus/**
-
-```json
-{
-  "success": true,
-  "data": {
-    "sections": {
-      "Operations": [
-        {
-          "id": "uuid-123",
-          "code": "dashboard",
-          "name": "Dashboard",
-          "href": "/dashboard",
-          "icon": "LayoutDashboard",
-          "order": 1,
-          "roles": [...]
-        }
-      ],
-      "Settings": [
-        {
-          "id": "uuid-456",
-          "code": "admin",
-          "name": "Admin",
-          "href": "/admin",
-          "icon": "ShieldCheck",
-          "order": 1,
-          "roles": [...]
-        }
-      ]
-    },
-    "all_menus": [...]
-  }
-}
-```
-
----
-
-## Testing Instructions
-
-### Manual Testing
-
-1. **Login as different roles** (User, Staff, Manager, Admin, Superadmin)
-2. **Verify sidebar menus** match role permissions
-3. **Check admin pages** can create/edit/delete menus
-4. **Test product gating** by assigning products to orgs
-5. **Verify custom menus** are organization-scoped
-
-### API Testing
-
-```bash
-# Get user's visible menus
-curl http://localhost:8000/api/menus/my-menus/ \
-  -H "Authorization: Bearer YOUR_TOKEN"
-
-# Create a custom menu
-curl -X POST http://localhost:8000/api/menus/ \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -d '{
-    "code": "reports",
-    "name": "Reports",
-    "href": "/reports",
-    "icon": "BarChart3",
-    "section": "Operations",
-    "order": 5
-  }'
-
-# Assign menu to role
-curl -X POST http://localhost:8000/api/menus/UUID/assign-role/ \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -d '{"role": "Manager"}'
-```
-
----
-
-## Architecture Overview
+### Core Visibility Logic — `_get_visible_menus()` (lines 132-164)
 
 ```
-Frontend                              Backend
-═══════════════════════════════════════════════════════════════
+1. Role-based menu IDs:  MenuRole where role=user.role (global + org-scoped)
+2. User-specific menu IDs:  MenuUser where user=current_user
+3. Union of both ID sets
+4. Filter:  is_active=True
+            AND (required_product IS NULL OR required_product IN purchased_products)
+            AND (SYSTEM + org_isnull OR CUSTOM + org=user.organization)
+5. Order by: section, order
+```
 
-User Login
+### Permissions (`permissions.py` — 90 lines)
+
+| Class | Type | Logic |
+|-------|------|-------|
+| `IsSuperadmin` | Global | `user.role == 'Superadmin'` |
+| `IsOrgOwner` | Global | User == org.owner |
+| `CanEditMenu` | Object-level | Delegates to `menu.can_edit(user)` |
+| `CanDeleteMenu` | Object-level | Delegates to `menu.can_delete(user)` |
+| `IsOrgAdminOrSuperadmin` | Global | `role in ['Superadmin', 'Admin']` |
+
+### URL Routing (`urls.py`)
+
+Mounted at `/api/` in `core/urls.py`. Uses DRF `DefaultRouter`:
+- `menus/` → MenuViewSet
+- `products/` → ProductViewSet
+- `organizations/` → OrganizationViewSet
+
+### Default Menu Seeding
+
+**Data migration** (`0002_seed_default_menus.py`): Creates 15 SYSTEM menus on first `migrate`.
+
+**Management command** (`seed_menus.py` — 314 lines): Idempotent re-seeding with `--reset` and `--dry-run` flags. Defines role groups:
+- `ALL_ROLES` — Superadmin, Admin, Manager, Staff, Vendor, User
+- `MANAGER_PLUS_ROLES` — Superadmin, Admin, Manager
+- `ADMIN_ONLY_ROLES` — Superadmin, Admin
+- Per-menu overrides: `dashboard` + `settings_pref` → ALL_ROLES; `admin` → ADMIN_ONLY; rest → MANAGER_PLUS
+
+**Default menus:**
+
+| Code | Name | Section | Icon | Access |
+|------|------|---------|------|--------|
+| `dashboard` | Dashboard | Operations | LayoutDashboard | All |
+| `contacts` | Contacts | Operations | Contact | Manager+ |
+| `crm` | CRM | Operations | Briefcase | Manager+ |
+| `docs` | Doc Tools | Operations | FileText | Manager+ |
+| `inventory` | Inventory | Operations | Box | Manager+ |
+| `hr` | HR | Operations | Users | Manager+ |
+| `accounts` | Accounts | Operations | CreditCard | Manager+ |
+| `media` | Media | Operations | ImageIcon | Manager+ |
+| `lms` | LMS | Operations | GraduationCap | Manager+ |
+| `sales` | Sales | Operations | TrendingUp | Manager+ |
+| `sales-tasks` | Sales Tasks | Operations | Target | Manager+ |
+| `sales-targets` | Targets | Operations | Crosshair | Manager+ |
+| `invoices` | Invoices | Operations | FileText | Manager+ |
+| `settings_pref` | Preferences | Settings | Settings | All |
+| `admin` | Admin | Admin | ShieldCheck | Admin+ |
+
+---
+
+## Frontend Architecture (`crm_frontend/`)
+
+### State Management — `MenuContext.jsx` (151 lines)
+
+- **Fetches** `GET /api/menus/my-menus/` on mount / user change
+- **Caches** in `sessionStorage` (key: `menus_v2_{userId}`, TTL: 30s)
+- **Refreshes** imperatively via `refreshMenus(force=false)` — pass `true` to bypass cache
+- **Exports** via `useMenu()` hook: `{ menus, sections, loading, error, refreshMenus }`
+- **Provider hierarchy**: `AuthProvider > MenuProvider` (in `App.jsx`)
+
+### Sidebar Rendering — `Sidebar.jsx` (163 lines)
+
+- Iterates `sections` object (e.g., `{ Operations: [...], Admin: [...] }`)
+- Renders section headings (uppercase, e.g. "OPERATIONS")
+- Sorts items by `item.order` within each section
+- Each item renders as `<Link>` with:
+  - Dynamic icon via `getLucideIcon(item.icon)` (from `iconMapper.js`)
+  - Display name, href, ChevronRight indicator
+- **Active link detection**: exact match first, then prefix match for nested routes
+- **States handled**: loading (spinner), error (red message), empty (suggestive link), empty section ("No menus available")
+
+### Icon Resolution — `iconMapper.js`
+
+- Static mapping from Lucide name strings to imported React components
+- `getLucideIcon(name)` — lookup with fallback to `LayoutDashboard`
+- `getAvailableIcons()` — returns full list for admin form dropdown
+
+### Admin Pages
+
+| Page | File | Path | Purpose |
+|------|------|------|---------|
+| AdminMenus | `AdminMenus.jsx` | `/admin/menus` | List/filter/search/sort menus, edit/delete |
+| AdminMenuForm | `AdminMenuForm.jsx` | `/admin/menus/create`, `/admin/menus/:id/edit` | Create/edit menu — all fields incl. icon dropdown, product selector, type toggle |
+| AdminMenuRoles | `AdminMenuRoles.jsx` | `/admin/menus/roles` | Role-to-menu matrix — checkboxes with optimistic updates + rollback |
+| UserMenuAssignModal | `UserMenuAssignModal.jsx` | (modal) | Per-user menu assignment — locked role-based + toggleable direct |
+| UserMenusPanel | `UserMenusPanel.jsx` | (embedded) | Read-only user effective menus split by "Via Role" / "Direct Assigned" |
+
+### Admin API Service — `menuService.js`
+
+| Method | Endpoint |
+|--------|----------|
+| `getAllMenus(params)` | `GET /api/menus/` |
+| `getUserDirectAssignments(userId)` | `GET /api/menus/user-assignments/` |
+| `getUserEffectiveMenus(userId)` | `GET /api/menus/user-effective-menus/` |
+| `bulkAssignMenusToUser(userId, menuIds)` | `POST /api/menus/user-assignments/` |
+| `assignMenuToRole(menuId, role, orgId)` | `POST /api/menus/{id}/assign-role/` |
+| `removeMenuFromRole(menuId, role, orgId)` | `POST /api/menus/{id}/remove-role/` |
+
+### Routing (`App.jsx`)
+
+Routes are hardcoded but linked dynamically via menu `href` fields. Key route-to-menu mapping:
+
+| Route | Component | Menu Code |
+|-------|-----------|-----------|
+| `/dashboard` | Dashboard | `dashboard` |
+| `/crm` | CRM | `crm` |
+| `/contacts` | Contacts | `contacts` |
+| `/docs` | Doc Tools | `docs` |
+| `/hr/*` | HR | `hr` |
+| `/accounts` | Accounts | `accounts` |
+| `/media` | Media | `media` |
+| `/lms` | LMS | `lms` |
+| `/inventory/*` | InventoryRoutes | `inventory` |
+| `/invoices/*` | Invoice pages | `invoices` |
+| `/sales/*` | SalesTaskManager | `sales` |
+| `/admin` | Admin overview | `admin` |
+| `/settings` | Settings | `settings_pref` |
+
+---
+
+## Complete Data Flow
+
+```
+[PostgreSQL DB]
     ↓
-AuthContext (stores user, role, org)
+Django REST API → GET /api/menus/my-menus/  (filtered by role, org, products)
     ↓
-MenuProvider fetches /api/menus/my-menus/
+Axios → MenuContext.jsx  (cached in sessionStorage, TTL 30s)
     ↓
-Sidebar renders dynamic menus
+useMenu() hook → { sections, loading, error, refreshMenus }
     ↓
-Click menu → Navigate to route
-
-Admin Pages
-├── AdminMenus → GET /api/menus/
-├── AdminMenuForm → POST/PATCH /api/menus/
-├── AdminProducts → GET /api/products/
-└── AdminOrganizations → GET /api/organizations/
+Sidebar.jsx  →  renders grouped nav links with Lucide icons
+    ↓
+react-router-dom  →  page components
 ```
 
----
+## Security & Access Control
 
-## Database Design
+1. **Authentication**: JWT token (required for all endpoints)
+2. **Role-based**: MenuRole entries per user role (global + org-scoped)
+3. **Direct assignment**: MenuUser overrides for individual users
+4. **Product gating**: `required_product` FK — menu hidden unless org purchased the product
+5. **Org scoping**: CUSTOM menus isolated per organization; SYSTEM menus visible to all
+6. **Soft-delete**: `is_active=False` hides menus without data loss
 
-### Menu Resolution Logic
+## Key Design Decisions
 
-```
-For each user:
-1. Get user's role and organization
-2. Query MenuRole where role matches user role
-3. Filter menus by required_product (if any)
-4. Filter menus by organization context (SYSTEM vs CUSTOM)
-5. Return sorted by section + order
-```
+1. **100% dynamic menus** — no hardcoded sidebar items
+2. **Role + direct assignment** — menus granted to roles or specific users
+3. **Product gating** — menus can require a purchased product license
+4. **Two menu types** — SYSTEM (Superadmin-managed) and CUSTOM (org-managed)
+5. **Sections are data-driven** — grouping and ordering configured in DB
+6. **Static icon mapping** — icons resolved client-side via `iconMapper.js`
 
-### Key Constraints
+## Files Summary
 
-- Menu code must be unique per organization
-- MenuRole is unique on (menu, role, organization)
-- Soft-delete via is_active flag
-- UUIDs for all primary keys
-- Timestamps on all entities
+### Backend (18 files)
+- `menus/models.py`, `menus/views.py`, `menus/serializers.py`, `menus/permissions.py`, `menus/urls.py`, `menus/admin.py`, `menus/apps.py`
+- `menus/management/commands/seed_menus.py`
+- `menus/migrations/0001_initial.py` through `0005_*.py`
+- `core/settings.py`, `core/urls.py`
 
----
-
-## Performance Considerations
-
-- ✅ Database indexes on frequently queried fields
-- ✅ Select_related for FK optimization
-- ✅ Menu results cached in MenuContext
-- ✅ Refresh available via useMenu hook
-- 🔄 Consider Redis caching for 5+ minute TTL (optional)
-- 🔄 Consider batch operations API (optional)
-
----
-
-## Future Enhancements
-
-1. **Nested Menus**: Support parent-child menu relationships
-2. **Menu Search**: Frontend search in menu list
-3. **Breadcrumbs**: Auto-generate based on menu hierarchy
-4. **Menu Analytics**: Track most used menus per role
-5. **Bulk Operations**: Assign menu to all roles at once
-6. **Custom Icons**: Upload SVG instead of predefined
-7. **Menu Caching**: Redis-based caching layer
-8. **Role Permissions**: Fine-grained per-menu permissions
-9. **Menu Variants**: Different styling for different menu types
-10. **Mobile Support**: Collapsible menu drawer
-
----
-
-## Troubleshooting
-
-### Menus Not Loading
-
-1. Check MenuContext is wrapped around app
-2. Verify user is authenticated
-3. Check browser console for API errors
-4. Confirm /api/menus/my-menus/ returns data
-
-### Role-Based Filtering Not Working
-
-1. Verify MenuRole entries exist for user's role
-2. Check organization context is set correctly
-3. Ensure menu is_active = true
-4. Verify product purchase if required_product set
-
-### Admin Pages Not Working
-
-1. Confirm user is Superadmin
-2. Check /admin/menus path exists in routing
-3. Verify axios base URL is correct
-4. Check API token is valid
-
----
-
-## Files Modified/Created
-
-### Backend
-
-- ✅ menus/models.py - All menu models
-- ✅ menus/views.py - MenuViewSet with filtering
-- ✅ menus/serializers.py - Serializers for API
-- ✅ menus/permissions.py - Permission classes
-- ✅ menus/admin.py - Django admin config
-- ✅ menus/urls.py - URL routing
-- ✅ menus/migrations/0001_initial.py
-- ✅ authentication/models.py - Added organization FK
-- ✅ authentication/migrations/0004_user_organization...
-
-### Frontend
-
-- ✅ src/utils/iconMapper.js - NEW
-- ✅ src/context/MenuContext.jsx - ENHANCED
-- ✅ src/components/Sidebar.jsx - UPDATED
-- ✅ src/App.jsx - UPDATED (MenuProvider)
-- ✅ src/modules/admin/pages/AdminMenus.jsx - NEW
-- ✅ src/modules/admin/pages/AdminMenuForm.jsx - NEW
-- ✅ src/modules/admin/pages/AdminProducts.jsx - NEW
-- ✅ src/modules/admin/pages/AdminOrganizations.jsx - NEW
-
----
-
-## Summary Statistics
-
-- **Total API Endpoints**: 12+ endpoints
-- **Database Models**: 5 core models + 1 enhanced
-- **Frontend Components**: 5 pages created/updated
-- **Default Menus**: 10 system menus
-- **Role Assignments**: 43 menu-role assignments
-- **Icon Support**: 40+ Lucide icons
-- **Test Coverage**: Dynamic role filtering verified
-
----
-
-✅ **Status: READY FOR PRODUCTION**
-
-The dynamic menu system is fully implemented and tested. All components are working correctly with proper error handling, loading states, and authorization checks.
-
-**Next Steps:**
-
-1. Deploy to production
-2. Run end-to-end tests across all roles
-3. Monitor API performance
-4. Gather user feedback
-5. Plan enhancements based on usage patterns
+### Frontend (12 files)
+- `src/context/MenuContext.jsx`, `src/components/Sidebar.jsx`, `src/components/Layout.jsx`
+- `src/utils/iconMapper.js`
+- `src/modules/admin/services/menuService.js`
+- `src/modules/admin/pages/AdminMenus.jsx`, `AdminMenuForm.jsx`, `AdminMenuRoles.jsx`, `Admin.jsx`
+- `src/modules/admin/components/UserManagement/UserMenuAssignModal.jsx`, `UserMenusPanel.jsx`
+- `src/App.jsx`
