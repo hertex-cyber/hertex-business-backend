@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Goods Receipt Note - {{ receipt.receipt_number }}</title>
+    <style>
+        @page { size: A4; margin: 15mm; }
+        body { font-family: 'Helvetica', 'Arial', sans-serif; font-size: 12px; color: #333; line-height: 1.5; }
+        .header { border-bottom: 2px solid #059669; padding-bottom: 15px; margin-bottom: 20px; }
+        .header h1 { color: #059669; margin: 0; font-size: 24px; }
+        .header .grn-number { font-size: 16px; color: #666; margin-top: 5px; }
+        .info-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        .info-table td { padding: 4px 8px; vertical-align: top; }
+        .info-table td:first-child { font-weight: bold; width: 150px; color: #555; }
+        .items-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        .items-table th { background: #059669; color: white; padding: 8px 10px; text-align: left; font-size: 11px; }
+        .items-table td { padding: 8px 10px; border-bottom: 1px solid #e5e7eb; font-size: 11px; }
+        .items-table tr:nth-child(even) { background: #f9fafb; }
+        .footer { margin-top: 40px; border-top: 1px solid #e5e7eb; padding-top: 15px; font-size: 10px; color: #999; text-align: center; }
+        .signature { margin-top: 40px; }
+        .signature td { width: 33%; text-align: center; padding-top: 40px; border-top: 1px solid #333; font-size: 11px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>GOODS RECEIPT NOTE</h1>
+        <div class="grn-number">{{ receipt.receipt_number }}</div>
+    </div>
+
+    <table class="info-table">
+        <tr>
+            <td>Receipt Date:</td>
+            <td>{{ receipt.receipt_date }}</td>
+            <td>PO Number:</td>
+            <td>{{ po.order_number }}</td>
+        </tr>
+        <tr>
+            <td>Supplier:</td>
+            <td>{{ po.supplier_name|default:po.supplier.name|default:"N/A" }}</td>
+            <td>Location:</td>
+            <td>{{ receipt.location.location_name|default:"N/A" }}</td>
+        </tr>
+        <tr>
+            <td>Received By:</td>
+            <td>{{ receipt.created_by.get_full_name|default:receipt.created_by.email|default:"N/A" }}</td>
+            <td>PO Date:</td>
+            <td>{{ po.order_date }}</td>
+        </tr>
+    </table>
+
+    <table class="items-table">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Item Code</th>
+                <th>Item Name</th>
+                <th>Ordered Qty</th>
+                <th>Received Qty</th>
+                <th>Unit Price</th>
+                <th>Total</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in items %}
+            <tr>
+                <td>{{ forloop.counter }}</td>
+                <td>{{ item.item.item_code }}</td>
+                <td>{{ item.item.item_name }}</td>
+                <td>{{ item.purchase_order_item.ordered_quantity }}</td>
+                <td>{{ item.received_quantity }}</td>
+                <td>{{ item.unit_price }}</td>
+                <td>{{ item.received_quantity|floatformat:2 }} x {{ item.unit_price|floatformat:2 }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    {% if receipt.notes %}
+    <div style="background:#f9fafb; padding:12px; border-radius:6px; margin-top:15px; font-size:11px;">
+        <strong>Notes:</strong><br>
+        {{ receipt.notes|linebreaks }}
+    </div>
+    {% endif %}
+
+    <table class="signature">
+        <tr>
+            <td>Received By</td>
+            <td>Checked By</td>
+            <td>Approved By</td>
+        </tr>
+    </table>
+
+    <div class="footer">
+        <p>Generated on {{ today }} | GRN {{ receipt.receipt_number }}</p>
+    </div>
+</body>
+</html>

@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Stock Count Sheet - {{ stock_count.count_number }}</title>
+    <style>
+        @page {
+            size: A4 landscape;
+            margin: 15mm;
+        }
+        body {
+            font-family: 'Helvetica', 'Arial', sans-serif;
+            font-size: 10pt;
+            color: #333;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #1a73e8;
+            padding-bottom: 10px;
+        }
+        .header h1 {
+            font-size: 18pt;
+            color: #1a73e8;
+            margin: 0 0 5px 0;
+        }
+        .header .subtitle {
+            font-size: 11pt;
+            color: #666;
+        }
+        .info-table {
+            width: 100%;
+            margin-bottom: 15px;
+            border-collapse: collapse;
+        }
+        .info-table td {
+            padding: 4px 10px;
+            border: none;
+        }
+        .info-table .label {
+            font-weight: bold;
+            color: #555;
+            width: 120px;
+        }
+        .info-table .value {
+            color: #333;
+        }
+        table.items {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 9pt;
+        }
+        table.items th {
+            background-color: #1a73e8;
+            color: white;
+            padding: 8px 6px;
+            text-align: left;
+            font-weight: bold;
+            font-size: 9pt;
+        }
+        table.items td {
+            padding: 6px;
+            border-bottom: 1px solid #ddd;
+            vertical-align: top;
+        }
+        table.items tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+        table.items .count-row {
+            background-color: #fff3cd;
+        }
+        .footer {
+            margin-top: 20px;
+            text-align: center;
+            font-size: 8pt;
+            color: #999;
+            border-top: 1px solid #ddd;
+            padding-top: 10px;
+        }
+        .blank-row td {
+            height: 30px;
+            border-bottom: 1px solid #ccc;
+        }
+        .signature-section {
+            margin-top: 30px;
+        }
+        .signature-section table {
+            width: 100%;
+        }
+        .signature-section td {
+            padding: 10px;
+            vertical-align: top;
+        }
+        .signature-line {
+            border-top: 1px solid #333;
+            margin-top: 40px;
+            padding-top: 5px;
+            font-size: 9pt;
+            text-align: center;
+        }
+        .page-break {
+            page-break-before: always;
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Physical Stock Count Sheet</h1>
+    <div class="subtitle">{{ stock_count.count_number }} — {{ stock_count.get_count_type_display }}</div>
+</div>
+
+<table class="info-table">
+    <tr>
+        <td class="label">Count #:</td>
+        <td class="value">{{ stock_count.count_number }}</td>
+        <td class="label">Date:</td>
+        <td class="value">{{ stock_count.count_date }}</td>
+    </tr>
+    <tr>
+        <td class="label">Location:</td>
+        <td class="value">{{ stock_count.location.location_name }}</td>
+        <td class="label">Type:</td>
+        <td class="value">{{ stock_count.get_count_type_display }}</td>
+    </tr>
+    <tr>
+        <td class="label">Reason:</td>
+        <td class="value">{{ stock_count.reason.reason_name }}</td>
+        <td class="label">Status:</td>
+        <td class="value">{{ stock_count.get_status_display }}</td>
+    </tr>
+    {% if stock_count.assigned_counters.exists %}
+    <tr>
+        <td class="label">Counters:</td>
+        <td class="value" colspan="3">
+            {% for counter in stock_count.assigned_counters.all %}
+                {{ counter.get_full_name }}{% if not forloop.last %}, {% endif %}
+            {% endfor %}
+        </td>
+    </tr>
+    {% endif %}
+</table>
+
+<table class="items">
+    <thead>
+        <tr>
+            <th style="width:40px">#</th>
+            <th style="width:100px">Item Code</th>
+            <th>Item Name</th>
+            <th style="width:60px">Unit</th>
+            <th style="width:80px">Expected Qty</th>
+            <th style="width:80px">Counted Qty</th>
+            <th style="width:80px">Difference</th>
+            <th>Remarks</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for item in items %}
+        <tr>
+            <td style="text-align:center">{{ forloop.counter }}</td>
+            <td>{{ item.item.item_code }}</td>
+            <td>{{ item.item.item_name }}</td>
+            <td>{{ item.unit.unit_name|default:"" }}</td>
+            <td style="text-align:right">{{ item.expected_quantity|floatformat:2 }}</td>
+            <td style="text-align:right">
+                {% if item.counted_quantity is not None %}
+                    {{ item.counted_quantity|floatformat:2 }}
+                {% else %}
+                    <em>—</em>
+                {% endif %}
+            </td>
+            <td style="text-align:right">
+                {% if item.counted_quantity is not None %}
+                    {% if item.difference_quantity > 0 %}
+                        <span style="color:#28a745">+{{ item.difference_quantity|floatformat:2 }}</span>
+                    {% elif item.difference_quantity < 0 %}
+                        <span style="color:#dc3545">{{ item.difference_quantity|floatformat:2 }}</span>
+                    {% else %}
+                        {{ item.difference_quantity|floatformat:2 }}
+                    {% endif %}
+                {% else %}
+                    <em>—</em>
+                {% endif %}
+            </td>
+            <td>{{ item.remarks }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<div class="signature-section">
+    <table>
+        <tr>
+            <td style="width:33%">
+                <div class="signature-line">Counted by</div>
+            </td>
+            <td style="width:33%">
+                <div class="signature-line">Approved by</div>
+            </td>
+            <td style="width:33%">
+                <div class="signature-line">Date</div>
+            </td>
+        </tr>
+    </table>
+</div>
+
+<div class="footer">
+    Generated on {% now "Y-m-d H:i" %} | Page 1 of 1
+</div>
+
+</body>
+</html>

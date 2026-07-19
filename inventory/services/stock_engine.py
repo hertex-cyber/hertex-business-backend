@@ -26,7 +26,7 @@ from inventory.models import StockLedger, StockSummary, InventoryItem
 def get_physical_stock(item_id, tenant_id, location_id=None):
     """
     Calculate physical stock from ledger.
-    Physical = Opening + Purchase + Transfer In + Return - Sale - Transfer Out - Damage - Consumption
+    Physical = Opening + Purchase + Purchase In + Transfer In + Return - Sale - Transfer Out - Damage - Consumption
     """
     qs = StockLedger.objects.filter(
         tenant_id=tenant_id,
@@ -37,8 +37,11 @@ def get_physical_stock(item_id, tenant_id, location_id=None):
 
     # Physical stock includes all transaction types except reservations
     physical_types = [
-        'OPENING', 'PURCHASE', 'SALE', 'TRANSFER_IN', 'TRANSFER_OUT',
-        'RETURN', 'DAMAGE', 'LOST', 'EXPIRED', 'CONSUMPTION', 'ADJUSTMENT',
+        'OPENING', 'PURCHASE', 'PURCHASE_IN', 'GOODS_RECEIPT',
+        'PURCHASE_RETURN',
+        'SALE', 'TRANSFER_IN', 'TRANSFER_OUT',
+        'RETURN', 'DAMAGE', 'LOST', 'EXPIRED', 'CONSUMPTION',
+        'ADJUSTMENT_IN', 'ADJUSTMENT_OUT',
     ]
     qs = qs.filter(transaction_type__in=physical_types)
 
@@ -55,28 +58,15 @@ def get_reserved_stock(item_id, tenant_id, location_id=None):
     - RESERVATION entries use +quantity.
     - RESERVATION_RELEASE entries use -quantity (to reduce the reservation).
     """
-    # Sum active reservations (positive quantities)
-    res_qs = StockLedger.objects.filter(
+    qs = StockLedger.objects.filter(
         tenant_id=tenant_id,
         item_id=item_id,
-        transaction_type='RESERVATION',
+        transaction_type__in=['RESERVATION', 'RESERVATION_RELEASE'],
     )
     if location_id:
-        res_qs = res_qs.filter(location_id=location_id)
-    res = res_qs.aggregate(total=Sum('quantity'))['total'] or Decimal('0')
-
-    # Sum releases (negative quantities stored as negative)
-    rel_qs = StockLedger.objects.filter(
-        tenant_id=tenant_id,
-        item_id=item_id,
-        transaction_type='RESERVATION_RELEASE',
-    )
-    if location_id:
-        rel_qs = rel_qs.filter(location_id=location_id)
-    rel = rel_qs.aggregate(total=Sum('quantity'))['total'] or Decimal('0')
-
-    # rel is negative (reductions), so adding it subtracts
-    return res + rel
+        qs = qs.filter(location_id=location_id)
+    result = qs.aggregate(total=Sum('quantity'))['total'] or Decimal('0')
+    return result
 
 
 def get_available_stock(item_id, tenant_id, location_id=None):
@@ -88,22 +78,54 @@ def get_available_stock(item_id, tenant_id, location_id=None):
 
 def get_in_transit_stock(tenant_id, location_id=None, item_id=None):
     """
-    Calculate in-transit stock.
-    In Transit = Transfer Out entries not yet received
+    Calculate in-transit stock from the ledger.
+
+    In Transit = sum(TRANSFER_OUT) - sum(TRANSFER_IN) for the same references.
+    Completed transfers (where TRANSFER_IN entries exist) no longer
+    contribute to the in-transit count.
+
+    Pure ledger-based calculation — never reads transfer model state.
     """
-    qs = StockLedger.objects.filter(
+    # ---- total sent out ----
+    out_qs = StockLedger.objects.filter(
         tenant_id=tenant_id,
         transaction_type='TRANSFER_OUT',
     )
     if location_id:
-        qs = qs.filter(location_id=location_id)
+        out_qs = out_qs.filter(location_id=location_id)
     if item_id:
-        qs = qs.filter(item_id=item_id)
+        out_qs = out_qs.filter(item_id=item_id)
 
-    result = qs.aggregate(total=Sum('quantity'))
-    # quantity is negative for TRANSFER_OUT, so negate it
-    total = result['total'] or Decimal('0')
-    return abs(total)
+    total_sent = abs(
+        out_qs.aggregate(total=Sum('quantity'))['total'] or Decimal('0')
+    )
+
+    if total_sent == 0:
+        return Decimal('0')
+
+    # ---- total received (matched by reference_id) ----
+    ref_ids = list(
+        out_qs.exclude(reference_id='')
+        .values_list('reference_id', flat=True)
+        .distinct()
+    )
+    ref_ids = [r for r in ref_ids if r]
+
+    if not ref_ids:
+        return total_sent
+
+    in_qs = StockLedger.objects.filter(
+        tenant_id=tenant_id,
+        transaction_type='TRANSFER_IN',
+        reference_id__in=ref_ids,
+    )
+    if item_id:
+        in_qs = in_qs.filter(item_id=item_id)
+
+    total_received = in_qs.aggregate(total=Sum('quantity'))['total'] or Decimal('0')
+
+    in_transit = total_sent - abs(total_received)
+    return max(in_transit, Decimal('0'))
 
 
 def get_damaged_stock(item_id, tenant_id, location_id=None):
@@ -129,36 +151,35 @@ def get_item_availability(item_id, tenant_id):
     """Get stock breakdown for an item across all locations."""
     item = InventoryItem.objects.get(id=item_id, tenant_id=tenant_id)
 
-    # Get all locations that have ledger entries for this item
-    location_ids = StockLedger.objects.filter(
-        tenant_id=tenant_id,
-        item_id=item_id,
-    ).values_list('location_id', flat=True).distinct()
+    # Bulk-fetch from StockSummary instead of per-location ledger queries
+    stock_rows = StockSummary.objects.filter(
+        tenant_id=tenant_id, item_id=item_id,
+    ).values('location_id', 'physical_quantity', 'reserved_quantity',
+             'damaged_quantity', 'in_transit_quantity')
 
     locations_data = []
     total_physical = Decimal('0')
     total_reserved = Decimal('0')
     total_damaged = Decimal('0')
 
-    for loc_id in location_ids:
-        if loc_id is None:
-            continue
-        physical = get_physical_stock(item_id, tenant_id, loc_id)
-        reserved = get_reserved_stock(item_id, tenant_id, loc_id)
-        damaged = get_damaged_stock(item_id, tenant_id, loc_id)
-        available = physical - reserved
+    for row in stock_rows:
+        physical = row['physical_quantity'] or Decimal('0')
+        reserved = row['reserved_quantity'] or Decimal('0')
+        damaged = row['damaged_quantity'] or Decimal('0')
+        loc_id = row['location_id']
 
         total_physical += physical
         total_reserved += reserved
         total_damaged += damaged
 
-        locations_data.append({
-            'location_id': loc_id,
-            'physical': physical,
-            'reserved': reserved,
-            'available': available,
-            'damaged': damaged,
-        })
+        if loc_id is not None:
+            locations_data.append({
+                'location_id': loc_id,
+                'physical': physical,
+                'reserved': reserved,
+                'available': physical - reserved,
+                'damaged': damaged,
+            })
 
     return {
         'item_id': item.id,
@@ -187,28 +208,56 @@ def get_location_availability(location_id, tenant_id):
     ).values_list('item_id', flat=True).distinct()
 
     items_data = []
-    for item_id in item_ids:
-        physical = get_physical_stock(item_id, tenant_id, location_id)
-        reserved = get_reserved_stock(item_id, tenant_id, location_id)
-        available = physical - reserved
+    if not item_ids:
+        return items_data
 
+    stock_rows = StockSummary.objects.filter(
+        tenant_id=tenant_id,
+        item_id__in=list(item_ids),
+        location_id=location_id,
+    ).select_related('item').values(
+        'item_id', 'physical_quantity', 'reserved_quantity',
+    )
+
+    for row in stock_rows:
+        physical = row['physical_quantity'] or Decimal('0')
+        reserved = row['reserved_quantity'] or Decimal('0')
         if physical == 0 and reserved == 0:
             continue
-
         try:
-            item = InventoryItem.objects.get(id=item_id, tenant_id=tenant_id)
+            item = InventoryItem.objects.get(id=row['item_id'], tenant_id=tenant_id)
             items_data.append({
                 'item_id': item.id,
                 'item_code': item.item_code,
                 'item_name': item.item_name,
                 'physical': physical,
                 'reserved': reserved,
-                'available': available,
+                'available': physical - reserved,
             })
         except InventoryItem.DoesNotExist:
             pass
 
     return items_data
+
+
+def _get_stock_bulk(tenant_id, item_ids=None):
+    """
+    Bulk-fetch stock quantities from StockSummary for many items at once.
+    Returns dict: {item_id: {'physical': ..., 'reserved': ..., 'damaged': ..., 'in_transit': ...}}
+    """
+    qs = StockSummary.objects.filter(tenant_id=tenant_id)
+    if item_ids:
+        qs = qs.filter(item_id__in=item_ids)
+    result = {}
+    for row in qs.values('item_id', 'physical_quantity', 'reserved_quantity',
+                         'damaged_quantity', 'in_transit_quantity'):
+        result[row['item_id']] = {
+            'physical': row['physical_quantity'] or Decimal('0'),
+            'reserved': row['reserved_quantity'] or Decimal('0'),
+            'damaged': row['damaged_quantity'] or Decimal('0'),
+            'in_transit': row['in_transit_quantity'] or Decimal('0'),
+        }
+    return result
 
 
 # ===========================================================================
@@ -218,6 +267,7 @@ def get_location_availability(location_id, tenant_id):
 def get_all_availability(tenant_id, filters=None):
     """
     Get stock availability for all items with optional filters.
+    Uses StockSummary for bulk cached quantities instead of per-item ledger queries.
     Filters can include: category, brand, search, status, location
     """
     items = InventoryItem.objects.filter(tenant_id=tenant_id)
@@ -237,14 +287,16 @@ def get_all_availability(tenant_id, filters=None):
             items = items.filter(status=filters['status'])
 
     items = items.select_related('category', 'brand', 'unit')
+    item_ids = list(items.values_list('id', flat=True))
+
+    stock_map = _get_stock_bulk(tenant_id, item_ids)
 
     results = []
     for item in items:
-        physical = get_physical_stock(item.id, tenant_id)
-        reserved = get_reserved_stock(item.id, tenant_id)
+        s = stock_map.get(item.id, {})
+        physical = s.get('physical', Decimal('0'))
+        reserved = s.get('reserved', Decimal('0'))
         available = physical - reserved
-        damaged = get_damaged_stock(item.id, tenant_id)
-        in_transit = get_in_transit_stock(tenant_id, item_id=item.id)
 
         results.append({
             'item_id': item.id,
@@ -256,8 +308,8 @@ def get_all_availability(tenant_id, filters=None):
             'physical': physical,
             'reserved': reserved,
             'available': available,
-            'in_transit': in_transit,
-            'damaged': damaged,
+            'in_transit': s.get('in_transit', Decimal('0')),
+            'damaged': s.get('damaged', Decimal('0')),
             'cost_price': item.cost_price,
             'selling_price': item.selling_price,
             'cost_value': (physical * item.cost_price) if item.cost_price else Decimal('0'),
@@ -280,10 +332,16 @@ def get_low_stock_items(tenant_id):
         tenant_id=tenant_id,
         min_stock_level__isnull=False,
         status='ACTIVE',
-    )
+    ).select_related('category', 'brand', 'unit')
+    item_ids = list(items.values_list('id', flat=True))
+    stock_map = _get_stock_bulk(tenant_id, item_ids)
+
     results = []
     for item in items:
-        available = get_available_stock(item.id, tenant_id)
+        s = stock_map.get(item.id, {})
+        physical = s.get('physical', Decimal('0'))
+        reserved = s.get('reserved', Decimal('0'))
+        available = physical - reserved
         if available < item.min_stock_level:
             suggested = (item.reorder_level or item.min_stock_level) - available
             results.append({
@@ -304,10 +362,16 @@ def get_out_of_stock_items(tenant_id):
     items = InventoryItem.objects.filter(
         tenant_id=tenant_id,
         status='ACTIVE',
-    )
+    ).select_related('category', 'brand', 'unit')
+    item_ids = list(items.values_list('id', flat=True))
+    stock_map = _get_stock_bulk(tenant_id, item_ids)
+
     results = []
     for item in items:
-        available = get_available_stock(item.id, tenant_id)
+        s = stock_map.get(item.id, {})
+        physical = s.get('physical', Decimal('0'))
+        reserved = s.get('reserved', Decimal('0'))
+        available = physical - reserved
         if available <= 0:
             results.append({
                 'item_id': item.id,

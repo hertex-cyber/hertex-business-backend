@@ -20,4 +20,5 @@ urlpatterns = [
     path('api/sales/', include('sales_task_manager.urls')),
     path('api/', include('media.urls')),
     path('api/inventory/', include('inventory.urls')),
+    path('api/inventory/', include('inventory.feature_urls')),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

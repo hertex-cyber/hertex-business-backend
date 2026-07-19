@@ -1,18 +1,39 @@
 """
-Transfer Service — handles stock transfer workflow and ledger integration.
+Transfer Service — handles stock transfer workflow, history logging, and notifications.
 
-Every transfer action creates the appropriate Stock Ledger entries.
+Every transfer action:
+1. Validates the state transition
+2. Creates Stock Ledger entries (dispatch/receive)
+3. Logs a history entry
+4. Sends notifications to relevant parties
+
 Never update stock quantities directly.
 """
 
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from inventory.models import InventoryTransfer, InventoryTransferItem, StockLedger
+from inventory.models import (
+    InventoryTransfer, InventoryTransferItem,
+    InventoryTransferHistory, InventoryItem, StockLedger,
+)
 from inventory.services.stock_engine import (
     get_available_stock,
     create_ledger_entry,
 )
+from inventory.services.notification_service import InventoryNotificationService
+
+
+def _log_history(transfer, action, from_status, to_status, user, remarks=''):
+    """Create a history entry for a transfer action."""
+    InventoryTransferHistory.objects.create(
+        transfer=transfer,
+        action=action,
+        from_status=from_status,
+        to_status=to_status,
+        performed_by=user,
+        remarks=remarks,
+    )
 
 
 def generate_transfer_number(tenant_id):
@@ -59,6 +80,12 @@ def create_transfer(tenant_id, data, created_by):
             remarks=item_data.get('remarks', ''),
         )
 
+    # Log creation
+    _log_history(transfer, 'CREATED', '', 'DRAFT', created_by)
+
+    # Notify on creation
+    InventoryNotificationService.notify_event('created', transfer)
+
     return transfer
 
 
@@ -68,8 +95,16 @@ def submit_transfer(transfer, user):
     if transfer.status != 'DRAFT':
         raise ValueError(f"Cannot submit transfer in status '{transfer.status}'")
 
-    # Check stock availability for all items
-    for item in transfer.items.all():
+    # Lock items and check stock availability
+    items = transfer.items.select_related('item').all()
+    item_ids = [i.item_id for i in items]
+    locked_items = list(
+        InventoryItem.objects.filter(
+            id__in=item_ids, tenant_id=transfer.tenant_id
+        ).select_for_update()
+    )
+
+    for item in items:
         available = get_available_stock(
             item.item_id, transfer.tenant_id, transfer.source_location_id
         )
@@ -82,6 +117,10 @@ def submit_transfer(transfer, user):
     transfer.status = 'PENDING_APPROVAL'
     transfer.updated_by = user
     transfer.save()
+
+    # Log submission
+    _log_history(transfer, 'SUBMITTED', 'DRAFT', 'PENDING_APPROVAL', user)
+
     return transfer
 
 
@@ -97,6 +136,13 @@ def approve_transfer(transfer, user, notes=''):
     transfer.approval_notes = notes
     transfer.updated_by = user
     transfer.save()
+
+    # Log approval
+    _log_history(transfer, 'APPROVED', 'PENDING_APPROVAL', 'APPROVED', user, notes)
+
+    # Notify creator
+    InventoryNotificationService.notify_event('approved', transfer)
+
     return transfer
 
 
@@ -112,6 +158,13 @@ def reject_transfer(transfer, user, notes=''):
     transfer.approval_notes = notes
     transfer.updated_by = user
     transfer.save()
+
+    # Log rejection
+    _log_history(transfer, 'REJECTED', 'PENDING_APPROVAL', 'REJECTED', user, notes)
+
+    # Notify creator
+    InventoryNotificationService.notify_event('rejected', transfer)
+
     return transfer
 
 
@@ -124,8 +177,16 @@ def dispatch_transfer(transfer, user):
     if transfer.status not in ['APPROVED', 'DRAFT']:
         raise ValueError(f"Cannot dispatch transfer in status '{transfer.status}'")
 
-    # Check stock again before dispatch
-    for item in transfer.items.all():
+    # Lock items and check stock availability
+    items = transfer.items.select_related('item', 'item__unit').all()
+    item_ids = [i.item_id for i in items]
+    locked_items = list(
+        InventoryItem.objects.filter(
+            id__in=item_ids, tenant_id=transfer.tenant_id
+        ).select_for_update()
+    )
+
+    for item in items:
         available = get_available_stock(
             item.item_id, transfer.tenant_id, transfer.source_location_id
         )
@@ -136,7 +197,7 @@ def dispatch_transfer(transfer, user):
             )
 
     # Create TRANSFER_OUT ledger entries
-    for item in transfer.items.all():
+    for item in items:
         create_ledger_entry(
             tenant_id=transfer.tenant_id,
             item_id=item.item_id,
@@ -149,10 +210,18 @@ def dispatch_transfer(transfer, user):
             created_by=user,
         )
 
+    old_status = transfer.status
     transfer.status = 'IN_TRANSIT'
     transfer.dispatched_at = timezone.now()
     transfer.updated_by = user
     transfer.save()
+
+    # Log dispatch
+    _log_history(transfer, 'DISPATCHED', old_status, 'IN_TRANSIT', user)
+
+    # Notify destination
+    InventoryNotificationService.notify_event('dispatched', transfer)
+
     return transfer
 
 
@@ -168,13 +237,22 @@ def receive_transfer(transfer, user, received_items=None):
     if transfer.status != 'IN_TRANSIT':
         raise ValueError(f"Cannot receive transfer in status '{transfer.status}'")
 
+    # Lock destination items
+    items = transfer.items.select_related('item', 'item__unit').all()
+    item_ids = [i.item_id for i in items]
+    locked_items = list(
+        InventoryItem.objects.filter(
+            id__in=item_ids, tenant_id=transfer.tenant_id
+        ).select_for_update()
+    )
+
     is_partial = False
     if received_items:
         received_map = {r['item_id']: r for r in received_items}
     else:
         received_map = {}
 
-    for item in transfer.items.all():
+    for item in items:
         if item.item_id in received_map:
             received_qty = Decimal(str(received_map[item.item_id].get('received_quantity', item.quantity)))
             damaged_qty = Decimal(str(received_map[item.item_id].get('damaged_quantity', 0)))
@@ -237,6 +315,13 @@ def receive_transfer(transfer, user, received_items=None):
         transfer.status = 'COMPLETED'
         transfer.save()
 
+    # Log receipt
+    action = 'PARTIALLY_RECEIVED' if is_partial else 'COMPLETED'
+    _log_history(transfer, action, 'IN_TRANSIT', transfer.status, user)
+
+    # Notify creator
+    InventoryNotificationService.notify_event('received', transfer)
+
     return transfer
 
 
@@ -246,7 +331,12 @@ def cancel_transfer(transfer, user):
     if transfer.status not in ['DRAFT', 'PENDING_APPROVAL']:
         raise ValueError(f"Cannot cancel transfer in status '{transfer.status}'")
 
+    old_status = transfer.status
     transfer.status = 'CANCELLED'
     transfer.updated_by = user
     transfer.save()
+
+    # Log cancellation
+    _log_history(transfer, 'CANCELLED', old_status, 'CANCELLED', user)
+
     return transfer
