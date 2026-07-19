@@ -1,3 +1,4 @@
+import uuid
 from rest_framework import serializers
 from authentication.models import User, Department
 from hr.models import (
@@ -6,11 +7,15 @@ from hr.models import (
     Shift, CompensatoryOff, SalaryComponent, SalaryStructure,
     SalaryStructureDetail, EmployeeSalary, Payroll, PayrollComponentDetail,
     Holiday,
+    SalaryRevision, EmployeeLoan, LoanRepayment, EmployeeReimbursement,
     PFConfiguration, PFContribution, ESIConfiguration, ESIContribution,
     ProfessionalTaxSlab, PTContribution, TDSConfiguration,
     InvestmentDeclaration, TDSCalculation, GratuityConfiguration,
     GratuityCalculation, BonusConfiguration, BonusCalculation,
-    ComplianceCalendarEntry
+    ComplianceCalendarEntry,
+    VPFContribution, PFStatement, ESICard, LowerDeductionCertificate,
+    PTEnrollment, InternationalWorker, Form12BA, Form24QReturn,
+    IPAccessRestriction
 )
 
 
@@ -87,7 +92,7 @@ class EmployeeListSerializer(serializers.ModelSerializer):
         model = Employee
         fields = ['id', 'employee_id', 'full_name', 'first_name', 'middle_name', 'last_name',
                   'date_of_birth', 'gender', 'marital_status', 'blood_group', 'nationality',
-                  'personal_email', 'personal_mobile',
+                  'personal_email', 'official_email', 'personal_mobile',
                   'current_address', 'current_city', 'current_state', 'current_country', 'current_pin_code',
                   'permanent_address', 'permanent_city', 'permanent_state', 'permanent_country', 'permanent_pin_code',
                   'aadhaar_number', 'pan_number', 'bank_account_number', 'ifsc_code', 'bank_name',
@@ -115,7 +120,7 @@ class EmployeeDetailSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'employee_id', 'user', 'full_name', 'first_name', 'middle_name', 'last_name',
             'date_of_birth', 'age', 'gender', 'marital_status', 'blood_group', 'nationality',
-            'personal_email', 'personal_mobile', 'current_address', 'current_city', 'current_state',
+            'personal_email', 'official_email', 'personal_mobile', 'current_address', 'current_city', 'current_state',
             'current_country', 'current_pin_code', 'permanent_address', 'permanent_city',
             'permanent_state', 'permanent_country', 'permanent_pin_code', 'emergency_contact_1_name',
             'emergency_contact_1_mobile', 'emergency_contact_1_relation', 'emergency_contact_2_name',
@@ -402,3 +407,309 @@ class ComplianceCalendarEntrySerializer(serializers.ModelSerializer):
         model = ComplianceCalendarEntry
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+# ============================================================================
+# PAYROLL ENHANCEMENT SERIALIZERS
+# ============================================================================
+
+class SalaryRevisionSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+    recommended_by_name = serializers.CharField(source='recommended_by.get_full_name', read_only=True)
+    approved_by_manager_name = serializers.CharField(source='approved_by_manager.get_full_name', read_only=True)
+    approved_by_hr_name = serializers.CharField(source='approved_by_hr.get_full_name', read_only=True)
+
+    class Meta:
+        model = SalaryRevision
+        fields = '__all__'
+        read_only_fields = ['id', 'percentage_increase', 'is_processed', 'arrears_amount', 'created_at', 'updated_at']
+
+
+class SalaryRevisionListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for listing revisions."""
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+    department_name = serializers.CharField(source='employee.department.name', read_only=True)
+
+    class Meta:
+        model = SalaryRevision
+        fields = [
+            'id', 'employee', 'employee_name', 'employee_id_field', 'department_name',
+            'previous_ctc', 'revised_ctc', 'percentage_increase',
+            'revision_type', 'status', 'effective_month', 'effective_year',
+            'recommended_by', 'is_processed', 'created_at',
+        ]
+        read_only_fields = ['id', 'percentage_increase', 'created_at']
+
+
+class EmployeeLoanSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+
+    class Meta:
+        model = EmployeeLoan
+        fields = '__all__'
+        read_only_fields = ['id', 'paid_amount', 'paid_emis', 'outstanding_amount', 'created_at', 'updated_at']
+
+
+class EmployeeLoanListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for listing loans."""
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+
+    class Meta:
+        model = EmployeeLoan
+        fields = [
+            'id', 'employee', 'employee_name', 'employee_id_field',
+            'loan_type', 'principal_amount', 'emi_amount', 'total_emis',
+            'paid_emis', 'outstanding_amount', 'status', 'sanction_date',
+        ]
+        read_only_fields = ['id', 'paid_emis', 'outstanding_amount']
+
+
+class LoanRepaymentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LoanRepayment
+        fields = '__all__'
+        read_only_fields = ['id', 'payment_date', 'created_at']
+
+
+class EmployeeReimbursementSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
+
+    class Meta:
+        model = EmployeeReimbursement
+        fields = '__all__'
+        read_only_fields = ['id', 'applied_date', 'created_at', 'updated_at']
+
+
+class EmployeeReimbursementListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for listing reimbursements."""
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+
+    class Meta:
+        model = EmployeeReimbursement
+        fields = [
+            'id', 'employee', 'employee_name', 'employee_id_field',
+            'expense_type', 'description', 'amount', 'expense_date',
+            'status', 'applied_date',
+        ]
+        read_only_fields = ['id', 'applied_date', 'created_at']
+
+
+# ============================================================================
+# PAYROLL PROCESSING & REPORT SERIALIZERS
+# ============================================================================
+
+class PayrollProcessSerializer(serializers.Serializer):
+    """Serializer for initiating payroll processing."""
+    month = serializers.IntegerField(min_value=1, max_value=12)
+    year = serializers.IntegerField()
+    test_mode = serializers.BooleanField(default=False)
+    department = serializers.UUIDField(required=False, allow_null=True)
+    location = serializers.UUIDField(required=False, allow_null=True)
+
+
+class PayrollApproveSerializer(serializers.Serializer):
+    """Serializer for approving payroll."""
+    ids = serializers.ListField(child=serializers.UUIDField(), required=False)
+    all_employees = serializers.BooleanField(default=False)
+    remarks = serializers.CharField(required=False, allow_blank=True)
+
+
+class BankFileSerializer(serializers.Serializer):
+    """Serializer for bank file generation."""
+    month = serializers.IntegerField(min_value=1, max_value=12)
+    year = serializers.IntegerField()
+    format = serializers.ChoiceField(choices=['NEFT', 'RTGS'], default='NEFT')
+
+
+class PayrollReportSerializer(serializers.Serializer):
+    """Serializer for generating payroll reports."""
+    month = serializers.IntegerField(min_value=1, max_value=12)
+    year = serializers.IntegerField()
+    report_type = serializers.ChoiceField(
+        choices=['salary_register', 'department_summary', 'variance_report'],
+        default='salary_register'
+    )
+    previous_month = serializers.IntegerField(required=False, min_value=1, max_value=12)
+    previous_year = serializers.IntegerField(required=False)
+
+
+# ============================================================================
+# NEW MODEL SERIALIZERS: LWF, OVERTIME, SHIFT SWAP, REGULARIZATION
+# ============================================================================
+
+from hr.models import (
+    LWFConfiguration, LWFContribution,
+    OvertimeRequest, ShiftSwapRequest, AttendanceRegularizationRequest
+)
+
+
+class LWFConfigurationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LWFConfiguration
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class LWFContributionSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+
+    class Meta:
+        model = LWFContribution
+        fields = '__all__'
+        read_only_fields = ['id', 'total_contribution', 'created_at', 'updated_at']
+
+
+class OvertimeRequestSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
+
+    class Meta:
+        model = OvertimeRequest
+        fields = '__all__'
+        read_only_fields = ['id', 'ot_amount', 'created_at', 'updated_at']
+
+
+class ShiftSwapRequestSerializer(serializers.ModelSerializer):
+    requesting_employee_name = serializers.CharField(
+        source='requesting_employee.get_full_name', read_only=True
+    )
+    target_employee_name = serializers.CharField(
+        source='target_employee.get_full_name', read_only=True
+    )
+    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
+
+    class Meta:
+        model = ShiftSwapRequest
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class AttendanceRegularizationRequestSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    attendance_date = serializers.DateField(source='attendance.date', read_only=True)
+    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
+
+    class Meta:
+        model = AttendanceRegularizationRequest
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+
+# ============================================================================
+# STATUTORY COMPLIANCE FORMS SERIALIZERS
+# ============================================================================
+
+class VPFContributionSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+    class Meta:
+        model = VPFContribution
+        fields = '__all__'
+        read_only_fields = ['id', 'vpf_amount', 'created_at', 'updated_at']
+
+
+class PFStatementSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+    form_type_display = serializers.CharField(source='get_form_type_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    class Meta:
+        model = PFStatement
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class ESICardSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+    class Meta:
+        model = ESICard
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class LowerDeductionCertificateSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+    certificate_type_display = serializers.CharField(source='get_certificate_type_display', read_only=True)
+    verified_by_name = serializers.CharField(source='verified_by.get_full_name', read_only=True)
+    class Meta:
+        model = LowerDeductionCertificate
+        fields = '__all__'
+        read_only_fields = ['id', 'is_verified', 'verified_date', 'created_at', 'updated_at']
+
+
+class PTEnrollmentSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+    class Meta:
+        model = PTEnrollment
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class InternationalWorkerSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+    class Meta:
+        model = InternationalWorker
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class Form12BASerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_id_field = serializers.CharField(source='employee.employee_id', read_only=True)
+    perquisite_type_display = serializers.CharField(source='get_perquisite_type_display', read_only=True)
+    class Meta:
+        model = Form12BA
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class Form24QReturnSerializer(serializers.ModelSerializer):
+    quarter_display = serializers.CharField(source='get_quarter_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    class Meta:
+        model = Form24QReturn
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+# ============================================================================
+# DATA SECURITY SERIALIZERS
+# ============================================================================
+
+class IPAccessRestrictionSerializer(serializers.ModelSerializer):
+    restriction_type_display = serializers.CharField(source='get_restriction_type_display', read_only=True)
+    user_name = serializers.CharField(source='user.get_full_name', read_only=True)
+    
+    class Meta:
+        model = IPAccessRestriction
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class DedupSerializer(serializers.Serializer):
+    """Serializer for employee duplicate check request."""
+    aadhaar_number = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    pan_number = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    personal_email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
+    personal_mobile = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    first_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    last_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class BulkDedupSerializer(serializers.Serializer):
+    """Serializer for bulk dedup check request."""
+    employee_ids = serializers.ListField(child=serializers.UUIDField(), required=False, allow_empty=True)

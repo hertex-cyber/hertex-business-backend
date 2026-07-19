@@ -1,6 +1,25 @@
 from rest_framework import permissions
 
 
+class HasHRRole(permissions.BasePermission):
+    """
+    Check that the user has one of the specified roles.
+    Usage: HasHRRole(allowed_roles=['Superadmin', 'Admin'])
+    """
+    allowed_roles = ['Superadmin', 'Admin']
+
+    def __init__(self, allowed_roles=None):
+        if allowed_roles is not None:
+            self.allowed_roles = allowed_roles
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user and
+            request.user.is_authenticated and
+            request.user.role in self.allowed_roles
+        )
+
+
 class IsHRAdmin(permissions.BasePermission):
     """
     Allow access only to HR Admin or Superadmin users
@@ -188,3 +207,27 @@ class CanManageDocuments(permissions.BasePermission):
         
         # Employee can access their own documents
         return obj.employee.user == request.user
+
+
+class IsFinanceOrHR(permissions.BasePermission):
+    """
+    Finance and HR roles for F&F settlement approvals
+    """
+    def has_permission(self, request, view):
+        return bool(
+            request.user and
+            request.user.is_authenticated and
+            request.user.role in ['Superadmin', 'Admin']
+        )
+
+
+class IsRecruitmentTeam(permissions.BasePermission):
+    """
+    Recruitment team access (HR staff with recruitment focus)
+    """
+    def has_permission(self, request, view):
+        return bool(
+            request.user and
+            request.user.is_authenticated and
+            request.user.role in ['Superadmin', 'Admin']
+        )

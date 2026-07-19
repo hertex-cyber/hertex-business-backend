@@ -5,6 +5,7 @@ from hr.models import (
     LeaveType, EmployeeLeaveBalance, LeaveApplication, Attendance, Shift,
     CompensatoryOff, SalaryComponent, SalaryStructure, SalaryStructureDetail,
     EmployeeSalary, Payroll, PayrollComponentDetail, Holiday,
+    SalaryRevision, EmployeeLoan, LoanRepayment, EmployeeReimbursement,
     PFConfiguration, PFContribution, ESIConfiguration, ESIContribution,
     ProfessionalTaxSlab, PTContribution, TDSConfiguration,
     InvestmentDeclaration, TDSCalculation, GratuityConfiguration,
@@ -355,6 +356,53 @@ class BonusCalculationAdmin(admin.ModelAdmin):
     list_filter = ['financial_year', 'is_paid']
     search_fields = ['employee__employee_id']
     readonly_fields = ['created_at', 'updated_at']
+
+
+# ============================================================================
+# PAYROLL ENHANCEMENTS ADMIN
+# ============================================================================
+
+
+@admin.register(SalaryRevision)
+class SalaryRevisionAdmin(admin.ModelAdmin):
+    list_display = ['employee', 'previous_ctc', 'revised_ctc', 'percentage_increase', 'status', 'effective_month', 'effective_year', 'is_processed']
+    list_filter = ['status', 'revision_type', 'effective_year', 'is_processed']
+    search_fields = ['employee__employee_id', 'employee__first_name', 'employee__last_name']
+    readonly_fields = ['percentage_increase', 'is_processed', 'created_at', 'updated_at']
+    actions = ['approve_selected']
+
+    def approve_selected(self, request, queryset):
+        from django.utils import timezone
+        queryset.filter(status='PENDING_FINANCE').update(status='APPROVED', approved_date=timezone.now())
+    approve_selected.short_description = 'Approve selected revisions'
+
+
+@admin.register(EmployeeLoan)
+class EmployeeLoanAdmin(admin.ModelAdmin):
+    list_display = ['employee', 'loan_type', 'principal_amount', 'emi_amount', 'outstanding_amount', 'status']
+    list_filter = ['loan_type', 'status', 'sanction_date']
+    search_fields = ['employee__employee_id', 'employee__first_name']
+    readonly_fields = ['paid_amount', 'paid_emis', 'outstanding_amount', 'created_at', 'updated_at']
+
+
+@admin.register(LoanRepayment)
+class LoanRepaymentAdmin(admin.ModelAdmin):
+    list_display = ['loan', 'amount', 'month', 'year', 'payment_date']
+    list_filter = ['month', 'year', 'is_processed']
+    readonly_fields = ['payment_date', 'created_at']
+
+
+@admin.register(EmployeeReimbursement)
+class EmployeeReimbursementAdmin(admin.ModelAdmin):
+    list_display = ['employee', 'expense_type', 'amount', 'status', 'applied_date']
+    list_filter = ['expense_type', 'status', 'applied_date']
+    search_fields = ['employee__employee_id', 'description']
+    actions = ['approve_reimbursements']
+
+    def approve_reimbursements(self, request, queryset):
+        from django.utils import timezone
+        queryset.filter(status='PENDING').update(status='APPROVED', approved_by=request.user, approved_date=timezone.now())
+    approve_reimbursements.short_description = 'Approve selected reimbursements'
 
 
 @admin.register(ComplianceCalendarEntry)
