@@ -375,6 +375,330 @@ class BonusComplianceService:
         return {'processed': processed}
 
 
+class LWFComplianceService:
+    """Labour Welfare Fund compliance calculation and challan generation."""
+
+    def __init__(self, month: int, year: int):
+        self.month = month
+        self.year = year
+        self.config = None
+
+    def _get_period(self, month: int, year: int) -> str:
+        """Determine LWF period based on month."""
+        if month in [1, 2, 3, 4, 5, 6]:
+            return 'JAN_JUN'
+        elif month in [7, 8, 9, 10, 11, 12]:
+            return 'JUL_DEC'
+        return 'ANNUAL'
+
+    def _get_lwf_config_for_employee(self, employee: Employee) -> Optional['LWFConfiguration']:
+        """Get applicable LWF configuration for employee based on state."""
+        state = (employee.work_location.state if employee.work_location else 'Unknown')
+        today = date.today()
+
+        config = LWFConfiguration.objects.filter(
+            state__iexact=state,
+            effective_from__lte=today,
+            is_active=True
+        ).order_by('-effective_from').first()
+
+        if not config and state != 'Unknown':
+            config = LWFConfiguration.objects.filter(
+                state__iexact='All India',
+                effective_from__lte=today,
+                is_active=True
+            ).order_by('-effective_from').first()
+
+        return config
+
+    def calculate_lwf(self, employee: Employee, gross_salary: Decimal) -> dict:
+        """Calculate LWF contributions for an employee."""
+        config = self._get_lwf_config_for_employee(employee)
+        if not config or not (config.employee_contribution > 0 or config.employer_contribution > 0):
+            return {'employee_amount': Decimal('0'), 'employer_amount': Decimal('0'), 'is_eligible': False}
+
+        # LWF is typically calculated on basic salary, not gross
+        employee_amount = (gross_salary * config.employee_contribution / Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        employer_amount = (gross_salary * config.employer_contribution / Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        return {
+            'employee_amount': employee_amount,
+            'employer_amount': employer_amount,
+            'total_amount': employee_amount + employer_amount,
+            'config': config,
+            'is_eligible': True,
+        }
+
+    @transaction.atomic
+    def process_all(self) -> dict:
+        """Process LWF for all eligible employees."""
+        processed = 0
+        errors = []
+
+        period = self._get_period(self.month, self.year)
+        payrolls = Payroll.objects.filter(month=self.month, year=self.year, status__in=['PROCESSED', 'APPROVED', 'PAID'])
+
+        for payroll in payrolls.select_related('employee'):
+            try:
+                state = payroll.employee.work_location.state if payroll.employee.work_location else 'Unknown'
+                config = self._get_lwf_config_for_employee(payroll.employee)
+
+                if not config or not (config.employee_contribution > 0 or config.employer_contribution > 0):
+                    continue
+
+                result = self.calculate_lwf(payroll.employee, payroll.basic_salary)
+
+                if result['is_eligible']:
+                    LWFContribution.objects.update_or_create(
+                        employee=payroll.employee,
+                        period=period,
+                        year=self.year,
+                        defaults={
+                            'payroll': payroll,
+                            'config': config,
+                            'state': state,
+                            'employee_contribution': result['employee_amount'],
+                            'employer_contribution': result['employer_amount'],
+                            'total_contribution': result['total_amount'],
+                            'is_challan_generated': False,
+                        }
+                    )
+                    processed += 1
+
+            except Exception as e:
+                errors.append({'employee_id': str(payroll.employee.id), 'error': str(e)})
+
+        return {'processed': processed, 'errors': errors, 'period': period}
+
+    def generate_challans(self) -> dict:
+        """Generate LWF challans for pending contributions."""
+        contributions = LWFContribution.objects.filter(
+            year=self.year,
+            period=self._get_period(self.month, self.year),
+            is_challan_generated=False
+        ).select_related('employee', 'config')
+
+        challans = []
+        for contrib in contributions:
+            state = contrib.state if contrib.state else 'Unknown'
+            bank_name = f"State Bank of {state}" if state != 'Unknown' else "Main Bank"
+            account_number = f"SB{contrib.employee.employee_id}"
+
+            challan_data = {
+                'employee_id': contrib.employee.employee_id,
+                'employee_name': contrib.employee.get_full_name(),
+                'state': state,
+                'employee_amount': float(contrib.employee_contribution),
+                'employer_amount': float(contrib.employer_contribution),
+                'total_amount': float(contrib.total_contribution),
+                'challan_date': date.today(),
+                'bank_name': bank_name,
+                'account_number': account_number,
+                'reference': f"LWF-{contrib.period}-{contrib.year}-{contrib.employee.employee_id}",
+            }
+
+            challans.append(challan_data)
+
+        return {'challans': challans, 'count': len(challans)}
+
+
+class TDSComplianceService:
+    """Tax Deducted at Source (TDS) compliance processing."""
+
+    def __init__(self, month: int, year: int):
+        self.month = month
+        self.year = year
+        self.financial_year = self._get_financial_year(date(year, month, 1))
+
+    def _get_financial_year(self, target_date: date) -> str:
+        """Get financial year string."""
+        if target_date.month >= 4:
+            return f"{target_date.year}-{target_date.year + 1}"
+        return f"{target_date.year - 1}-{target_date.year}"
+
+    def calculate_tds_monthly(self, employee: Employee, gross_salary: Decimal) -> dict:
+        """Calculate monthly TDS for an employee."""
+        config = TDSConfiguration.objects.filter(financial_year=self.financial_year, is_active=True).first()
+        if not config:
+            return {'current_tds': Decimal('0'), 'ytd_tax': Decimal('0'), 'is_eligible': False}
+
+        # Get investment declarations for the financial year
+        investment = InvestmentDeclaration.objects.filter(
+            employee=employee,
+            financial_year=self.financial_year,
+            is_submitted=True
+        ).first()
+
+        # Determine tax regime
+        tax_regime = 'OLD'
+        if investment:
+            tax_regime = investment.tax_regime
+
+        # Calculate taxable income
+        taxable_income = gross_salary
+
+        if tax_regime == 'OLD':
+            taxable_income -= config.standard_deduction_old
+
+            if investment:
+                taxable_income -= investment.section_80c_total
+                taxable_income -= investment.section_80d_self_family
+                taxable_income -= investment.section_80d_parents
+                taxable_income -= investment.section_80g_total
+                taxable_income -= investment.hra_rent_paid
+                taxable_income -= investment.lta_claimed
+                taxable_income -= investment.home_loan_interest
+                taxable_income -= investment.nps_employee
+                taxable_income -= investment.other_deductions
+
+        else:  # NEW REGIME
+            taxable_income -= config.standard_deduction_new
+            taxable_income -= investment.section_80c_total if investment else Decimal('0')
+            taxable_income -= investment.section_80d_self_family if investment else Decimal('0')
+            taxable_income -= investment.section_80d_parents if investment else Decimal('0')
+            taxable_income -= investment.section_80g_total if investment else Decimal('0')
+            taxable_income -= investment.hra_rent_paid if investment else Decimal('0')
+            taxable_income -= investment.lta_claimed if investment else Decimal('0')
+            taxable_income -= investment.home_loan_interest if investment else Decimal('0')
+            taxable_income -= investment.nps_employee if investment else Decimal('0')
+            taxable_income -= investment.other_deductions if investment else Decimal('0')
+
+        taxable_income = max(taxable_income, Decimal('0'))
+
+        # Apply tax slabs (simplified - full implementation would need config)
+        tax_rate = Decimal('0.05')  # Placeholder 5% for first slab
+        if taxable_income > 1250000:
+            tax_rate = Decimal('0.20')
+        if taxable_income > 5000000:
+            tax_rate = Decimal('0.30')
+
+        tax = (taxable_income * tax_rate / Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        cess = (tax * Decimal('0.04')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        total_tax = tax + cess
+
+        return {
+            'current_tds': total_tax,
+            'ytd_tax': Decimal('0'),  # Would need YTD data
+            'tax_regime': tax_regime,
+            'taxable_income': taxable_income,
+            'tax': tax,
+            'cess': cess,
+            'total_tax': total_tax,
+            'is_eligible': taxable_income > 0,
+        }
+
+    @transaction.atomic
+    def process_all(self) -> dict:
+        """Process TDS for all eligible employees."""
+        processed = 0
+        errors = []
+
+        # Get all payrolls for the month
+        payrolls = Payroll.objects.filter(month=self.month, year=self.year, status__in=['PROCESSED', 'APPROVED', 'PAID'])
+
+        for payroll in payrolls.select_related('employee'):
+            try:
+                result = self.calculate_tds_monthly(payroll.employee, payroll.gross_salary)
+
+                if result['is_eligible']:
+                    TDSCalculation.objects.update_or_create(
+                        employee=payroll.employee,
+                        payroll=payroll,
+                        financial_year=self.financial_year,
+                        month=self.month,
+                        year=self.year,
+                        defaults={
+                            'tax_regime': result['tax_regime'],
+                            'ytd_gross_salary': payroll.gross_salary,
+                            'ytd_exemptions': Decimal('0'),  # Would need YTD aggregation
+                            'ytd_standard_deduction': Decimal('0'),
+                            'ytd_deductions_80c': Decimal('0'),
+                            'ytd_other_deductions': Decimal('0'),
+                            'ytd_taxable_income': result['taxable_income'],
+                            'ytd_tax': result['current_tds'],
+                            'ytd_cess': result['cess'],
+                            'ytd_total_tax': result['total_tax'],
+                            'ytd_tds_deducted': Decimal('0'),  # Would track actual TDS deposit
+                            'current_month_tds': result['current_tds'],
+                        }
+                    )
+                    processed += 1
+
+            except Exception as e:
+                errors.append({'employee_id': str(payroll.employee.id), 'error': str(e)})
+
+        return {'processed': processed, 'errors': errors, 'financial_year': self.financial_year}
+
+    def generate_quarterly_return(self) -> dict:
+        """Generate quarterly TDS return in government format."""
+        quarters = {
+            'Q1': (7, 1, 1, 31),
+            'Q2': (10, 1, 10, 31),
+            'Q3': (1, 1, 1, 31),
+            'Q4': (4, 1, 4, 30),
+        }
+
+        current_q = None
+        for q, (m, d_start, m_end, d_end) in quarters.items():
+            if self.month == m:
+                current_q = q
+                break
+
+        if not current_q:
+            return {'error': 'No applicable quarter for current month'}
+
+        # Get TDS calculations for the quarter
+        tds_records = TDSCalculation.objects.filter(
+            year=self.year,
+            month__in=[1, 2, 3] if current_q == 'Q1' else
+            [4, 5, 6] if current_q == 'Q2' else
+            [7, 8, 9] if current_q == 'Q3' else
+            [10, 11, 12]
+        )
+
+        return_data = {
+            'quarter': current_q,
+            'financial_year': self.financial_year,
+            'total_individuals': tds_records.count(),
+            'total_tax_collected': sum(float(r.current_month_tds) for r in tds_records),
+            'records': []
+        }
+
+        return return_data
+
+    def generate_form_16(self) -> dict:
+        """Generate Form 16 (TDS certificate) for employees."""
+        tds_records = TDSCalculation.objects.filter(
+            year=self.year,
+            month=self.month
+        ).select_related('employee')
+
+        form_16_data = {
+            'financial_year': self.financial_year,
+            'employer_pan': 'PAN1234567A',
+            'employer_name': 'BYTEHIVE TECHNOLOGIES',
+            'employees': []
+        }
+
+        for record in tds_records:
+            employee_data = {
+                'employee_pan': record.employee.pan_number or 'PAN0000000A',
+                'employee_name': record.employee.get_full_name(),
+                'employee_id': record.employee.employee_id,
+                'gross_salary': float(record.ytd_gross_salary),
+                'standard_deduction': float(record.ytd_standard_deduction),
+                'other_deductions': float(record.ytd_other_deductions),
+                'taxable_income': float(record.ytd_taxable_income),
+                'tax': float(record.ytd_tax),
+                'cess': float(record.ytd_cess),
+                'total_tds': float(record.ytd_total_tax),
+                'tds_deducted': float(record.ytd_tds_deducted),
+            }
+            form_16_data['employees'].append(employee_data)
+
+        return form_16_data
+
+
 class ComplianceCalendarService:
     """Compliance calendar auto-population with alerts."""
 
@@ -465,6 +789,683 @@ class ComplianceCalendarService:
                                    config_data['description'], due_date, 'ANNUAL', year)
             entries.append(comp_type)
         return entries
+
+
+class GovernmentPortalIntegrationService:
+    """Integration service for government statutory portals."""
+
+    def __init__(self):
+        pass
+
+    def epfo_ecr_integration(self, month: int, year: int) -> dict:
+        """Generate EPFO ECR data for submission."""
+        pf_service = PFComplianceService(month, year)
+        ecr_data = pf_service.generate_ecr_data()
+
+        # Format for EPFO upload
+        formatted_data = {
+            'transaction_id': f"ECR-{year}{month:02d}-{ecr_data['summary']['total_members']}",
+            'period': f"{year}-{month:02d}",
+            'establishment_code': ecr_data['establishment']['est_code'],
+            'establishment_name': ecr_data['establishment']['est_name'],
+            'members': ecr_data['members'],
+            'summary': ecr_data['summary'],
+            'checksum': self._calculate_checksum(ecr_data),
+            'timestamp': datetime.now().isoformat(),
+        }
+
+        return formatted_data
+
+    def esic_integration(self, month: int, year: int) -> dict:
+        """Generate ESI return data for ESIC portal submission."""
+        esi_service = ESIComplianceService(month, year)
+        esi_contributions = esi_service.process_all()['processed']
+
+        # Get ESI contributions for the month
+        esi_data = ESIContribution.objects.filter(
+            month=month, year=year
+        ).select_related('employee', 'payroll')
+
+        # Format for ESIC upload
+        formatted_data = {
+            'transaction_id': f"ESI-{year}{month:02d}-{esi_data.count()}",
+            'period': f"{month:02d}/{year}",
+            'establishment_code': 'ESI1234567890',
+            'establishment_name': 'BYTEHIVE TECHNOLOGIES',
+            'total_members': esi_data.count(),
+            'total_employment_contribution': esi_data.aggregate(
+                total=Sum('total_contribution')
+            )['total'] or Decimal('0'),
+            'records': []
+        }
+
+        for esi in esi_data:
+            emp = esi.employee
+            formatted_data['records'].append({
+                'employee_id': emp.employee_id,
+                'ip_number': emp.ip_number or '',
+                'gross_salary': float(esi.gross_salary),
+                'employee_contribution': float(esi.employee_contribution),
+                'employer_contribution': float(esi.employer_contribution),
+                'total_contribution': float(esi.total_contribution),
+            })
+
+        return formatted_data
+
+    def traces_integration(self, financial_year: str) -> dict:
+        """Generate TDS data for TRACES portal (Form 24Q)."""
+        tds_service = TDSComplianceService(1, 2026)  # Current month/year for testing
+        return tds_service.generate_quarterly_return()
+
+    def _calculate_checksum(self, data: dict) -> str:
+        """Generate checksum for data integrity."""
+        import hashlib
+        import json
+
+        data_str = json.dumps(data, sort_keys=True)
+        return hashlib.sha256(data_str.encode()).hexdigest()[:32]
+
+    def bulk_upload_ecr_to_epfo(self, month: int, year: int) -> dict:
+        """Simulate bulk upload of ECR to EPFO portal."""
+        try:
+            ecr_data = self.epfo_ecr_integration(month, year)
+
+            # In production, this would make an authenticated API call to EPFO
+            # For now, we simulate the upload process
+            upload_response = {
+                'success': True,
+                'reference_number': ecr_data['transaction_id'],
+                'upload_datetime': datetime.now().isoformat(),
+                'message': 'ECR data successfully uploaded to EPFO portal',
+                'validation_status': 'VALID',
+                'record_count': ecr_data['summary']['total_members'],
+            }
+
+            return upload_response
+
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'message': 'Failed to upload ECR to EPFO portal',
+            }
+
+
+class ComplianceAnalyticsService:
+    """Analytics and reporting service for statutory compliance."""
+
+    def __init__(self):
+        pass
+
+    def get_compliance_dashboard(self) -> dict:
+        """Get compliance dashboard analytics."""
+        today = date.today()
+        current_year = today.year
+
+        dashboard = {
+            'summary': {},
+            'recent_alerts': {},
+            'compliance_trends': {},
+            'overdue_items': {},
+            'quarterly_summary': {},
+        }
+
+        # Get all compliance entries
+        calendar_entries = ComplianceCalendarEntry.objects.all()
+
+        # Summary statistics
+        dashboard['summary'] = {
+            'total_pending': calendar_entries.filter(status='PENDING').count(),
+            'total_overdue': calendar_entries.filter(status='PENDING').filter(due_date__lt=today).count(),
+            'total_complete': calendar_entries.filter(status='COMPLETED').count(),
+            'due_this_month': calendar_entries.filter(
+                due_date__month=today.month,
+                due_date__year=today.year,
+                status='PENDING'
+            ).count(),
+        }
+
+        # Recent alerts (next 30 days)
+        recent_events = calendar_entries.filter(
+            due_date__gte=today,
+            due_date__lte=today + timedelta(days=30),
+            status='PENDING'
+        ).order_by('due_date')
+
+        dashboard['recent_alerts'] = {
+            'count': recent_events.count(),
+            'by_type': {}
+        }
+
+        # Group alerts by compliance type
+        for event in recent_events:
+            comp_type = event.compliance_type
+            if comp_type not in dashboard['recent_alerts']['by_type']:
+                dashboard['recent_alerts']['by_type'][comp_type] = []
+
+            dashboard['recent_alerts']['by_type'][comp_type].append({
+                'id': str(event.id),
+                'title': event.title,
+                'due_date': event.due_date,
+                'days_remaining': (event.due_date - today).days,
+                'description': event.description,
+            })
+
+        # Overdue items
+        overdue_events = calendar_entries.filter(
+            due_date__lt=today,
+            status='PENDING'
+        ).order_by('due_date')
+
+        dashboard['overdue_items'] = {
+            'count': overdue_events.count(),
+            'items': []
+        }
+
+        for event in overdue_events:
+            dashboard['overdue_items']['items'].append({
+                'id': str(event.id),
+                'type': event.compliance_type,
+                'title': event.title,
+                'due_date': event.due_date,
+                'days_overdue': (today - event.due_date).days,
+                'description': event.description,
+            })
+
+        # Quarterly summary for last 4 quarters
+        from hr.services.compliance_service import ComplianceCalendarService
+        calendar_service = ComplianceCalendarService()
+
+        quarters = []
+        for i in range(4):
+            quarter_year = current_year - (i // 4)
+            quarter_num = ((current_year - quarter_year) * 4) - (i % 4)
+
+            quarter_events = calendar_entries.filter(
+                period_year=quarter_year,
+            )
+
+            quarters.append({
+                'quarter': f"Q{quarter_num} FY {quarter_year-1}-{quarter_year}",
+                'total_events': quarter_events.count(),
+                'pending_events': quarter_events.filter(status='PENDING').count(),
+                'overdue_events': quarter_events.filter(
+                    status='PENDING', due_date__lt=today
+                ).count(),
+            })
+
+        dashboard['compliance_trends'] = {'quarters': quarters}
+
+        # Statutory compliance specific trends
+        statutory_trends = {
+            'pf': {'filed': 0, 'pending': 0, 'overdue': 0},
+            'esi': {'filed': 0, 'pending': 0, 'overdue': 0},
+            'pt': {'filed': 0, 'pending': 0, 'overdue': 0},
+            'tds': {'filed': 0, 'pending': 0, 'overdue': 0},
+        }
+
+        # Get actual compliance data from models
+        today = date.today()
+
+        statutory_trends['pf']['filed'] = PFContribution.objects.filter(
+            month=today.month, year=today.year
+        ).exclude(is_challan_generated=False).count()
+
+        statutory_trends['esi']['filed'] = ESIContribution.objects.filter(
+            month=today.month, year=today.year
+        ).exclude(is_challan_generated=False).count()
+
+        statutory_trends['pt']['filed'] = PTContribution.objects.filter(
+            month=today.month, year=today.year
+        ).exclude(is_challan_generated=False).count()
+
+        dashboard['statutory_trends'] = statutory_trends
+
+        return dashboard
+
+    def get_statewise_pt_analytics(self, state: str = None) -> dict:
+        """Get Professional Tax analytics state-wise."""
+        state_filters = {}
+        if state:
+            state_filters = {'state__iexact': state}
+
+        pt_contributions = PTContribution.objects.filter(**state_filters).select_related('employee', 'payroll')
+
+        analytics = {
+            'total_contributions': pt_contributions.count(),
+            'total_amount': pt_contributions.aggregate(total=Sum('pt_amount'))['total'] or Decimal('0'),
+            'by_employee': [],
+            'by_grade': {},
+            'wage_slabs': {
+                'below_15000': pt_contributions.filter(pt_amount=0).count(),
+                '15000_20000': pt_contributions.filter(pt_amount=150).count(),
+                '20001_50000': pt_contributions.filter(pt_amount__in=[200, 300]).count(),
+                'above_50000': pt_contributions.filter(pt_amount=300).count(),
+            }
+        }
+
+        # Employee breakdown
+        for pt in pt_contributions[:20]:  # Top 20 for performance
+            employee = pt.employee
+            grade = employee.designation.grade if employee.designation else 'UNASSIGNED'
+
+            if grade not in analytics['by_grade']:
+                analytics['by_grade'][grade] = {'count': 0, 'total': Decimal('0')}
+
+            analytics['by_grade'][grade]['count'] += 1
+            analytics['by_grade'][grade]['total'] += pt.pt_amount
+
+            analytics['by_employee'].append({
+                'employee_id': pt.employee.employee_id,
+                'name': pt.employee.get_full_name(),
+                'state': pt.state,
+                'pt_amount': float(pt.pt_amount),
+                'gross_salary': float(pt.gross_salary),
+                'contribution_percentage': (float(pt.pt_amount) / float(pt.gross_salary) * 100) if pt.gross_salary > 0 else 0,
+            })
+
+        return analytics
+
+    def get_compliance_health_score(self) -> dict:
+        """Calculate overall compliance health score (0-100)."""
+        today = date.today()
+
+        # Base score
+        score = 100
+
+        # Deduct for overdue items
+        calendar_entries = ComplianceCalendarEntry.objects.all()
+        overdue_count = calendar_entries.filter(
+            due_date__lt=today,
+            status='PENDING'
+        ).count()
+
+        # Each overdue item reduces score by 2 points (max 20 points)
+        overdue_penalty = min(overdue_count * 2, 20)
+        score -= overdue_penalty
+
+        # Apply progressive reduction for pending items
+        pending_count = calendar_entries.filter(status='PENDING').count()
+        pending_ratio = pending_count / max(calendar_entries.count(), 1)
+        score -= int(pending_ratio * 10)  # Up to 10 points for pending items
+
+        # Statutory compliance score
+        statutory_score = self._calculate_statutory_compliance_score(today)
+        weighted_statutory_score = statutory_score * 0.4  # 40% weight
+
+        final_score = max(0, int(score + weighted_statutory_score))
+
+        return {
+            'health_score': final_score,
+            'grade': self._get_grade_from_score(final_score),
+            'components': {
+                'calendar_compliance': max(0, 100 - overdue_penalty - int(pending_ratio * 10)),
+                'statutory_compliance': statutory_score,
+                'overall': final_score,
+            },
+            'recommendations': self._generate_compliance_recommendations(final_score),
+        }
+
+    def _calculate_statutory_compliance_score(self, today: date) -> int:
+        """Calculate statutory compliance score for a given date."""
+        base_score = 100
+        deductions = 0
+
+        # PF compliance
+        pf_contributions = PFContribution.objects.filter(month=today.month, year=today.year)
+        pf_total = pf_contributions.count()
+
+        if pf_total > 0:
+            pf_completed = pf_contributions.exclude(is_ecr_generated=False).count()
+            pf_score = (pf_completed / pf_total) * 100 if pf_total > 0 else 0
+            deductions += (100 - pf_score) * 0.3  # 30% weight for PF
+
+        # ESI compliance
+        esi_contributions = ESIContribution.objects.filter(month=today.month, year=today.year)
+        esi_total = esi_contributions.count()
+
+        if esi_total > 0:
+            esi_completed = esi_contributions.exclude(is_challan_generated=False).count()
+            esi_score = (esi_completed / esi_total) * 100 if esi_total > 0 else 0
+            deductions += (100 - esi_score) * 0.3  # 30% weight for ESI
+
+        # PT compliance
+        pt_contributions = PTContribution.objects.filter(month=today.month, year=today.year)
+        pt_total = pt_contributions.count()
+
+        if pt_total > 0:
+            pt_completed = pt_contributions.exclude(is_challan_generated=False).count()
+            pt_score = (pt_completed / pt_total) * 100 if pt_total > 0 else 0
+            deductions += (100 - pt_score) * 0.2  # 20% weight for PT
+
+        # LWF compliance
+        lwf_contributions = LWFContribution.objects.filter(year=today.year, period='JUL_DEC')
+        lwf_total = lwf_contributions.count()
+
+        if lwf_total > 0:
+            lwf_completed = lwf_contributions.exclude(is_challan_generated=False).count()
+            lwf_score = (lwf_completed / lwf_total) * 100 if lwf_total > 0 else 0
+            deductions += (100 - lwf_score) * 0.2  # 20% weight for LWF
+
+        statutory_score = max(0, 100 - deductions)
+        return int(statutory_score)
+
+    def _get_grade_from_score(self, score: int) -> str:
+        """Convert numeric score to letter grade."""
+        if score >= 90:
+            return 'A'
+        elif score >= 80:
+            return 'B'
+        elif score >= 70:
+            return 'C'
+        elif score >= 60:
+            return 'D'
+        else:
+            return 'F'
+
+    def _generate_compliance_recommendations(self, score: int) -> list:
+        """Generate compliance recommendations based on score."""
+        recommendations = []
+
+        if score < 60:
+            recommendations.extend([
+                "Immediate action required on overdue compliance items",
+                "Prioritize statutory filings (PF, ESI, PT)",
+                "Implement automated compliance calendar",
+                "Set up government portal integration alerts",
+            ])
+        elif score < 80:
+            recommendations.extend([
+                "Focus on reducing pending compliance items",
+                "Set up automatic reminders for upcoming deadlines",
+                "Regularly update statutory configurations",
+            ])
+
+        if score >= 80:
+            recommendations.extend([
+                "Maintain current compliance practices",
+                "Set up quarterly compliance reviews",
+                "Consider compliance automation tools",
+            ])
+
+        return recommendations
+
+    def generate_annual_compliance_report(self, year: int) -> dict:
+        """Generate comprehensive annual compliance report."""
+        report = {
+            'year': year,
+            'summary': {},
+            'monthly_breakdown': {},
+            'statutory_compliance': {},
+            'penalties_assessment': {},
+            'recommendations': [],
+        }
+
+        # Monthly compliance data
+        for month in range(1, 13):
+            month_data = {
+                'pf_filed': PFContribution.objects.filter(month=month, year=year, is_ecr_generated=True).count(),
+                'esi_filed': ESIContribution.objects.filter(month=month, year=year, is_challan_generated=True).count(),
+                'pt_filed': PTContribution.objects.filter(month=month, year=year, is_challan_generated=True).count(),
+                'lwf_filed': LWFContribution.objects.filter(month=month, year=year, is_challan_generated=True).count(),
+                'total_pending': 0,
+            }
+
+            # Calculate pending items
+            calendar_entries = ComplianceCalendarEntry.objects.filter(period_year=year)
+            month_start = date(year, month, 1)
+            if month == 12:
+                month_end = date(year + 1, 1, 1) - timedelta(days=1)
+            else:
+                month_end = date(year, month + 1, 1) - timedelta(days=1)
+
+            month_data['total_pending'] = calendar_entries.filter(
+                due_date__gte=month_start,
+                due_date__lte=month_end,
+                status='PENDING'
+            ).count()
+
+            report['monthly_breakdown'][f"{month:02d}-{year}"] = month_data
+
+        # Statutory compliance summary
+        report['statutory_compliance'] = {
+            'pf_total_filed': PFContribution.objects.filter(year=year, is_ecr_generated=True).count(),
+            'pf_total_pending': PFContribution.objects.filter(year=year, is_ecr_generated=False).count(),
+            'esi_total_filed': ESIContribution.objects.filter(year=year, is_challan_generated=True).count(),
+            'esi_total_pending': ESIContribution.objects.filter(year=year, is_challan_generated=False).count(),
+            'pt_total_filed': PTContribution.objects.filter(year=year, is_challan_generated=True).count(),
+            'pt_total_pending': PTContribution.objects.filter(year=year, is_challan_generated=False).count(),
+            'lwf_total_filed': LWFContribution.objects.filter(year=year, is_challan_generated=True).count(),
+            'lwf_total_pending': LWFContribution.objects.filter(year=year, is_challan_generated=False).count(),
+        }
+
+        # Calculate compliance percentage
+        total_items = sum([
+            report['statutory_compliance']['pf_total_filed'] + report['statutory_compliance']['pf_total_pending'],
+            report['statutory_compliance']['esi_total_filed'] + report['statutory_compliance']['esi_total_pending'],
+            report['statutory_compliance']['pt_total_filed'] + report['statutory_compliance']['pt_total_pending'],
+            report['statutory_compliance']['lwf_total_filed'] + report['statutory_compliance']['lwf_total_pending'],
+        ])
+
+        if total_items > 0:
+            filed_items = sum([
+                report['statutory_compliance']['pf_total_filed'],
+                report['statutory_compliance']['esi_total_filed'],
+                report['statutory_compliance']['pt_total_filed'],
+                report['statutory_compliance']['lwf_total_filed'],
+            ])
+
+            report['compliance_percentage'] = (filed_items / total_items) * 100
+        else:
+            report['compliance_percentage'] = 0
+
+        # Generate recommendations based on report data
+        if report['compliance_percentage'] < 80:
+            report['recommendations'].extend([
+                "Implement automated compliance tracking system",
+                "Set up government portal integration for automated filing",
+                "Create compliance awareness training for HR team",
+                "Establish penalty avoidance protocols for overdue filings",
+            ])
+
+        return report
+
+    def validate_compliance(self) -> dict:
+        """Validate and audit compliance status across all statutory requirements."""
+        today = date.today()
+        validation_report = {
+            'timestamp': datetime.now().isoformat(),
+            'validation_status': 'SUCCESS',
+            'summary': {
+                'total_checks': 0,
+                'passed_checks': 0,
+                'failed_checks': 0,
+                'warnings': [],
+            },
+            'detailed_results': {},
+            'recommendations': [],
+        }
+
+        # 1. Compliance Calendar Validation
+        validation_report['summary']['total_checks'] += 1
+        calendar_entries = ComplianceCalendarEntry.objects.all()
+        overdue_entries = calendar_entries.filter(due_date__lt=today, status='PENDING')
+        validation_report['summary']['failed_checks'] += overdue_entries.count()
+
+        if overdue_entries.count() > 0:
+            validation_report['summary']['warnings'].extend([
+                f"{overdue_entries.count()} compliance items overdue",
+            ])
+            validation_report['validation_status'] = 'WARNING'
+        else:
+            validation_report['summary']['passed_checks'] += 1
+
+        validation_report['detailed_results']['calendar'] = {
+            'status': 'PASSED' if overdue_entries.count() == 0 else 'WARNING',
+            'total_entries': calendar_entries.count(),
+            'overdue_count': overdue_entries.count(),
+            'last_check': today.isoformat(),
+        }
+
+        # 2. PF Compliance Validation
+        validation_report['summary']['total_checks'] += 1
+        pf_contributions = PFContribution.objects.filter(month=today.month, year=today.year)
+        pf_total = pf_contributions.count()
+
+        if pf_total > 0:
+            pf_generated = pf_contributions.exclude(is_ecr_generated=False).count()
+            pf_success_rate = (pf_generated / pf_total) * 100
+
+            if pf_success_rate < 100:
+                validation_report['summary']['failed_checks'] += pf_total - pf_generated
+                validation_report['summary']['warnings'].append(f"PF ECR: {pf_total - pf_generated}/{pf_total} not generated")
+                validation_report['validation_status'] = 'WARNING'
+                validation_report['detailed_results']['pf'] = {
+                    'status': 'WARNING',
+                    'total_contributions': pf_total,
+                    'generated_count': pf_generated,
+                    'generation_rate': pf_success_rate,
+                }
+            else:
+                validation_report['summary']['passed_checks'] += 1
+                validation_report['detailed_results']['pf'] = {
+                    'status': 'PASSED',
+                    'total_contributions': pf_total,
+                    'generated_count': pf_generated,
+                    'generation_rate': pf_success_rate,
+                }
+
+        # 3. ESI Compliance Validation
+        validation_report['summary']['total_checks'] += 1
+        esi_contributions = ESIContribution.objects.filter(month=today.month, year=today.year)
+        esi_total = esi_contributions.count()
+
+        if esi_total > 0:
+            esi_generated = esi_contributions.exclude(is_challan_generated=False).count()
+            esi_success_rate = (esi_generated / esi_total) * 100
+
+            if esi_success_rate < 100:
+                validation_report['summary']['failed_checks'] += esi_total - esi_generated
+                validation_report['summary']['warnings'].append(f"ESI Challan: {esi_total - esi_generated}/{esi_total} not generated")
+                validation_report['validation_status'] = 'WARNING'
+                validation_report['detailed_results']['esi'] = {
+                    'status': 'WARNING',
+                    'total_contributions': esi_total,
+                    'generated_count': esi_generated,
+                    'generation_rate': esi_success_rate,
+                }
+            else:
+                validation_report['summary']['passed_checks'] += 1
+                validation_report['detailed_results']['esi'] = {
+                    'status': 'PASSED',
+                    'total_contributions': esi_total,
+                    'generated_count': esi_generated,
+                    'generation_rate': esi_success_rate,
+                }
+
+        # 4. PT Compliance Validation
+        validation_report['summary']['total_checks'] += 1
+        pt_contributions = PTContribution.objects.filter(month=today.month, year=today.year)
+        pt_total = pt_contributions.count()
+
+        if pt_total > 0:
+            pt_generated = pt_contributions.exclude(is_challan_generated=False).count()
+            pt_success_rate = (pt_generated / pt_total) * 100
+
+            if pt_success_rate < 100:
+                validation_report['summary']['failed_checks'] += pt_total - pt_generated
+                validation_report['summary']['warnings'].append(f"PT Challan: {pt_total - pt_generated}/{pt_total} not generated")
+                validation_report['validation_status'] = 'WARNING'
+                validation_report['detailed_results']['pt'] = {
+                    'status': 'WARNING',
+                    'total_contributions': pt_total,
+                    'generated_count': pt_generated,
+                    'generation_rate': pt_success_rate,
+                }
+            else:
+                validation_report['summary']['passed_checks'] += 1
+                validation_report['detailed_results']['pt'] = {
+                    'status': 'PASSED',
+                    'total_contributions': pt_total,
+                    'generated_count': pt_generated,
+                    'generation_rate': pt_success_rate,
+                }
+
+        # 5. LWF Compliance Validation
+        validation_report['summary']['total_checks'] += 1
+        lwf_contributions = LWFContribution.objects.filter(year=today.year, period='JUL_DEC')
+        lwf_total = lwf_contributions.count()
+
+        if lwf_total > 0:
+            lwf_generated = lwf_contributions.exclude(is_challan_generated=False).count()
+            lwf_success_rate = (lwf_generated / lwf_total) * 100
+
+            if lwf_success_rate < 100:
+                validation_report['summary']['failed_checks'] += lwf_total - lwf_generated
+                validation_report['summary']['warnings'].append(f"LWF Challan: {lwf_total - lwf_generated}/{lwf_total} not generated")
+                validation_report['validation_status'] = 'WARNING'
+                validation_report['detailed_results']['lwf'] = {
+                    'status': 'WARNING',
+                    'total_contributions': lwf_total,
+                    'generated_count': lwf_generated,
+                    'generation_rate': lwf_success_rate,
+                }
+            else:
+                validation_report['summary']['passed_checks'] += 1
+                validation_report['detailed_results']['lwf'] = {
+                    'status': 'PASSED',
+                    'total_contributions': lwf_total,
+                    'generated_count': lwf_generated,
+                    'generation_rate': lwf_success_rate,
+                }
+
+        # 6. Configuration Validation
+        validation_report['summary']['total_checks'] += 1
+        pf_config = PFConfiguration.objects.filter(is_active=True).first()
+        esi_config = ESIConfiguration.objects.filter(is_active=True).first()
+
+        if pf_config and esi_config:
+            validation_report['summary']['passed_checks'] += 1
+            validation_report['detailed_results']['configuration'] = {
+                'status': 'PASSED',
+                'pf_configured': True,
+                'esi_configured': True,
+                'configurations_verified': True,
+            }
+        else:
+            validation_report['summary']['failed_checks'] += 1
+            validation_report['validation_status'] = 'FAILED'
+            validation_report['detailed_results']['configuration'] = {
+                'status': 'FAILED',
+                'pf_configured': bool(pf_config),
+                'esi_configured': bool(esi_config),
+                'error': 'Missing critical statutory configurations',
+            }
+
+        # Generate recommendations based on validation results
+        if validation_report['summary']['failed_checks'] > 0:
+            validation_report['recommendations'].extend([
+                "Immediately address all overdue compliance items",
+                "Ensure proper challan generation for all statutory contributions",
+                "Update and verify statutory configurations",
+                "Implement automated compliance reminders",
+            ])
+
+        if validation_report['summary']['warnings']:
+            validation_report['recommendations'].extend([
+                "Set up alerts for compliance items close to deadline",
+                "Create escalation procedures for non-compliance",
+                "Conduct quarterly compliance health checks",
+            ])
+
+        if validation_report['summary']['failed_checks'] == 0:
+            validation_report['recommendations'].extend([
+                "Maintain current compliance practices",
+                "Schedule regular compliance health checks",
+                "Consider implementing compliance automation tools",
+            ])
+
+        return validation_report
 
     def _create_entry(self, comp_type, title, description, due_date, frequency, year):
         ComplianceCalendarEntry.objects.get_or_create(

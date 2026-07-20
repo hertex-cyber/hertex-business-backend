@@ -13,10 +13,17 @@ from .usermanagement_views import (
 app_name = "authentication"
 
 # Create router for viewsets
+<<<<<<< HEAD
 router = DefaultRouter(trailing_slash=False)
 router.register(r"users", UserViewSet, basename="user")
 router.register(r"activities", AuditLogViewSet, basename="activity")
 router.register(r"departments", DepartmentViewSet, basename="department")
+=======
+router = DefaultRouter()
+router.register(r'users', UserViewSet, basename='user')
+router.register(r'activities', AuditLogViewSet, basename='activity')
+router.register(r'departments', DepartmentViewSet, basename='department')
+>>>>>>> 3fed3cad513ec77d7a6b3f0098ba3d73fa6a0ff7
 
 urlpatterns = [
     # Bulk delete users

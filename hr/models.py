@@ -1,3 +1,4 @@
+from decimal import Decimal, ROUND_HALF_UP
 import uuid
 from django.db import models
 from django.utils import timezone
@@ -382,7 +383,7 @@ class EmployeeDocument(Main):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='documents')
     document_type = models.CharField(max_length=50, choices=DOCUMENT_TYPE)
-    document_file = models.FileField(upload_to='employee_documents/%Y/%m/')
+    document_file = models.FileField(max_length=255, upload_to='hr/employee_documents/%Y/%m/')
     document_number = models.CharField(max_length=100, blank=True, null=True)
     issue_date = models.DateField(blank=True, null=True)
     expiry_date = models.DateField(blank=True, null=True)
@@ -934,6 +935,7 @@ class JobApplication(Main):
     class Meta:
         verbose_name = 'Job Application'
         verbose_name_plural = 'Job Applications'
+        unique_together = ['candidate', 'requisition']
 
 # ==========================================
 # PERFORMANCE MANAGEMENT SYSTEM (PMS)
@@ -998,7 +1000,7 @@ class Resignation(Main):
     reason = models.TextField()
     requested_last_working_day = models.DateField()
     approved_last_working_day = models.DateField(null=True, blank=True)
-    status = models.CharField(max_length=20, choices=[('Pending', 'Pending'), ('Approved', 'Approved'), ('Rejected', 'Rejected'), ('Withdrawn', 'Withdrawn')])
+    status = models.CharField(max_length=20, choices=[('Pending', 'Pending'), ('Approved', 'Approved'), ('Rejected', 'Rejected'), ('Withdrawn', 'Withdrawn')], default='Pending')
 
 # ============================================================================
 # PAYROLL ENHANCEMENTS: SALARY REVISION, LOANS, REIMBURSEMENTS
@@ -1075,9 +1077,13 @@ class SalaryRevision(Main):
 
     def save(self, *args, **kwargs):
         if self.revised_ctc and self.previous_ctc and self.previous_ctc > 0:
-            self.percentage_increase = (
-                (self.revised_ctc - self.previous_ctc) / self.previous_ctc * Decimal('100')
-            ).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            try:
+                pct = (
+                    (self.revised_ctc - self.previous_ctc) / self.previous_ctc * Decimal('100')
+                ).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                self.percentage_increase = pct if pct <= Decimal('999.99') else Decimal('999.99')
+            except Exception:
+                self.percentage_increase = Decimal('999.99')
         super().save(*args, **kwargs)
 
 
@@ -1318,7 +1324,7 @@ class EmployeeDocumentVersion(Main):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     document = models.ForeignKey(EmployeeDocument, on_delete=models.CASCADE, related_name='versions')
     version_number = models.IntegerField()
-    document_file = models.FileField(upload_to='employee_documents_versions/%Y/%m/')
+    document_file = models.FileField(max_length=255, upload_to='hr/employee_documents_versions/%Y/%m/')
     uploaded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
     uploaded_date = models.DateTimeField(auto_now_add=True)
     change_reason = models.CharField(max_length=200, blank=True, null=True)

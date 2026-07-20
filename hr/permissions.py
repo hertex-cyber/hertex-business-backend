@@ -46,28 +46,36 @@ class IsHRStaff(permissions.BasePermission):
 
 class IsPayrollExecutive(permissions.BasePermission):
     """
-    Allow access only to payroll-related operations for designated users
+    Allow access to payroll-related operations for Payroll Executive + HR Admin
     """
     def has_permission(self, request, view):
-        # Can be extended to check for specific payroll role
         return bool(
             request.user and
             request.user.is_authenticated and
-            request.user.role in ['Superadmin', 'Admin']
+            request.user.role in ['Superadmin', 'Admin', 'Payroll Executive']
         )
 
 
 class IsManagerOrHR(permissions.BasePermission):
     """
-    Allow managers to access their team's data, and HR to access all
+    Allow managers to access their team's data, and HR to access all.
+    Also allows Finance (read-only) and Payroll Executive.
     """
     def has_permission(self, request, view):
-        return bool(request.user and request.user.is_authenticated)
+        return bool(
+            request.user and
+            request.user.is_authenticated and
+            request.user.role in ['Superadmin', 'Admin', 'Manager', 'Finance', 'Payroll Executive']
+        )
     
     def has_object_permission(self, request, view, obj):
         # HR Admin has full access
         if request.user.role in ['Superadmin', 'Admin']:
             return True
+        
+        # Finance and Payroll Executive: read-only access
+        if request.user.role in ['Finance', 'Payroll Executive']:
+            return request.method in permissions.SAFE_METHODS
         
         # Manager can access their own team
         if request.user.role == 'Manager':
@@ -144,13 +152,13 @@ class CanApproveLeave(permissions.BasePermission):
 
 class CanProcessPayroll(permissions.BasePermission):
     """
-    Only HR Admin and Payroll staff can process payroll
+    Only HR Admin and Payroll Executive can process payroll
     """
     def has_permission(self, request, view):
         return bool(
             request.user and
             request.user.is_authenticated and
-            request.user.role in ['Superadmin', 'Admin']
+            request.user.role in ['Superadmin', 'Admin', 'Payroll Executive']
         )
 
 
@@ -209,6 +217,39 @@ class CanManageDocuments(permissions.BasePermission):
         return obj.employee.user == request.user
 
 
+class IsManagerOfEmployee(permissions.BasePermission):
+    """
+    Check if the user is the reporting manager of the employee in the revision.
+    """
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated)
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.role in ['Superadmin', 'Admin']:
+            return True
+        if request.user.role == 'Manager':
+            try:
+                employee = request.user.employee
+                return obj.employee.reporting_manager == employee
+            except:
+                return False
+        return False
+
+
+class CanApproveSalaryRevision(permissions.BasePermission):
+    """
+    Role-based checks for salary revision approval stages.
+    - Manager: can approve at PENDING_MANAGER stage (own team only)
+    - Admin/Superadmin: can approve at any stage
+    """
+
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated)
+
+    def has_object_permission(self, request, view, obj):
+        return True  # action-level checks handle the logic
+
+
 class IsFinanceOrHR(permissions.BasePermission):
     """
     Finance and HR roles for F&F settlement approvals
@@ -217,7 +258,7 @@ class IsFinanceOrHR(permissions.BasePermission):
         return bool(
             request.user and
             request.user.is_authenticated and
-            request.user.role in ['Superadmin', 'Admin']
+            request.user.role in ['Superadmin', 'Admin', 'Finance']
         )
 
 

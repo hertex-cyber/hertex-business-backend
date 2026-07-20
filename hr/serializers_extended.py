@@ -82,7 +82,7 @@ class JobRequisitionSerializer(serializers.ModelSerializer):
     class Meta:
         model = JobRequisition
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'requested_by']
 
 
 class CandidateSerializer(serializers.ModelSerializer):
@@ -100,7 +100,12 @@ class CandidateSerializer(serializers.ModelSerializer):
 
 class JobApplicationSerializer(serializers.ModelSerializer):
     candidate_name = serializers.CharField(source='candidate.first_name', read_only=True)
+    candidate_first_name = serializers.CharField(source='candidate.first_name', read_only=True)
+    candidate_last_name = serializers.CharField(source='candidate.last_name', read_only=True)
     candidate_email = serializers.CharField(source='candidate.email', read_only=True)
+    candidate_phone = serializers.CharField(source='candidate.phone', read_only=True)
+    candidate_source = serializers.CharField(source='candidate.source', read_only=True)
+    candidate_experience_years = serializers.DecimalField(source='candidate.experience_years', read_only=True, max_digits=4, decimal_places=1)
     requisition_title = serializers.CharField(source='requisition.designation.name', read_only=True)
     requisition_department = serializers.CharField(source='requisition.department.name', read_only=True)
 
