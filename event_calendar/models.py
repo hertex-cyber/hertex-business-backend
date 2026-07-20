@@ -44,6 +44,7 @@ class CalendarTodo(models.Model):
     )
 
     status = models.CharField(max_length=20, blank=True, null=True)
+    hold_reason = models.TextField(blank=True, null=True)
 
     location = models.CharField(max_length=255, blank=True, null=True)
 
@@ -64,7 +65,11 @@ class CalendarTodo(models.Model):
 
     def save(self, *args, **kwargs):
         if self.todo_type == "task" and self.start:
-            if self.start < timezone.now() and self.status != "completed":
+            if self.start < timezone.now() and self.status not in (
+                "completed",
+                "on_hold",
+                "approved",
+            ):
                 self.status = "overdue"
             elif self.status == "overdue" and self.start > timezone.now():
                 self.status = "assigned"

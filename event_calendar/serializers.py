@@ -41,6 +41,7 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             "contact",
             "location",
             "status",
+            "hold_reason",
             "assigned_to",
             "attendees",
             "attendee_ids",
@@ -89,6 +90,7 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                 "canceled",
                 "on_hold",
                 "overdue",
+                "approved",
             ):
                 raise serializers.ValidationError(
                     {"status": f"Invalid status '{status}' for tasks."}
@@ -128,7 +130,7 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
         if (
             instance.todo_type == "task"
             and instance.start
-            and instance.status != "completed"
+            and instance.status not in ("completed", "on_hold", "approved")
         ):
             if instance.start < timezone.now():
                 data["status"] = "overdue"
