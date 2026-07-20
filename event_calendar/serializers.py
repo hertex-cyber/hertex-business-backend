@@ -1,3 +1,4 @@
+from django.utils import timezone
 from rest_framework import serializers
 from .models import CalendarTodo, MeetingAttendee
 
@@ -39,6 +40,7 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             "end",
             "contact",
             "location",
+            "status",
             "assigned_to",
             "attendees",
             "attendee_ids",
@@ -72,10 +74,24 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
     def validate(self, data):
         todo_type = data.get("todo_type", getattr(self.instance, "todo_type", None))
 
+        start_missing = "start" in data and not data.get("start")
+
         if todo_type == "task":
-            if not data.get("start"):
+            if start_missing or (self.instance is None and not data.get("start")):
                 raise serializers.ValidationError(
                     {"start": "Deadline is required for tasks."}
+                )
+            status = data.get("status")
+            if status and status not in (
+                "assigned",
+                "progress",
+                "completed",
+                "canceled",
+                "on_hold",
+                "overdue",
+            ):
+                raise serializers.ValidationError(
+                    {"status": f"Invalid status '{status}' for tasks."}
                 )
 
         elif todo_type == "event":
@@ -83,19 +99,19 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"description": "Description is required for events."}
                 )
-            if not data.get("start"):
+            if start_missing or (self.instance is None and not data.get("start")):
                 raise serializers.ValidationError(
                     {"start": "Date is required for events."}
                 )
 
         elif todo_type == "followup":
-            if not data.get("start"):
+            if start_missing or (self.instance is None and not data.get("start")):
                 raise serializers.ValidationError(
                     {"start": "Follow-up date is required."}
                 )
 
         elif todo_type == "meeting":
-            if not data.get("start"):
+            if start_missing or (self.instance is None and not data.get("start")):
                 raise serializers.ValidationError(
                     {"start": "Date & time is required for meetings."}
                 )
@@ -105,6 +121,17 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                 {"end": "End time must be after start time."}
             )
 
+        return data
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if (
+            instance.todo_type == "task"
+            and instance.start
+            and instance.status != "completed"
+        ):
+            if instance.start < timezone.now():
+                data["status"] = "overdue"
         return data
 
     def create(self, validated_data):

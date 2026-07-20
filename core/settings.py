@@ -172,7 +172,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = "en-us"
 
-TIME_ZONE = "UTC"
+TIME_ZONE = "Asia/Kolkata"
 
 USE_I18N = True
 
@@ -216,7 +216,7 @@ STORAGES = {
 AUTH_USER_MODEL = "authentication.User"
 
 # HR Module Configuration
-EMPLOYEE_ID_FORMAT = os.getenv('EMPLOYEE_ID_FORMAT', 'EMP-{year}-{seq:04d}')
+EMPLOYEE_ID_FORMAT = os.getenv("EMPLOYEE_ID_FORMAT", "EMP-{year}-{seq:04d}")
 # Available variables: {year} = current year, {seq} = sequence number
 # Example formats:
 #   'EMP-{year}-{seq:04d}'  → EMP-2026-0001

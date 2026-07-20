@@ -1,6 +1,7 @@
 import uuid
 from django.db import models
 from django.conf import settings
+from django.utils import timezone
 
 
 class CalendarTodo(models.Model):
@@ -42,6 +43,8 @@ class CalendarTodo(models.Model):
         related_name="followups",
     )
 
+    status = models.CharField(max_length=20, blank=True, null=True)
+
     location = models.CharField(max_length=255, blank=True, null=True)
 
     assigned_to = models.ForeignKey(
@@ -58,6 +61,14 @@ class CalendarTodo(models.Model):
     class Meta:
         db_table = "event_calendar_todos"
         ordering = ["-created_at"]
+
+    def save(self, *args, **kwargs):
+        if self.todo_type == "task" and self.start:
+            if self.start < timezone.now() and self.status != "completed":
+                self.status = "overdue"
+            elif self.status == "overdue" and self.start > timezone.now():
+                self.status = "assigned"
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"[{self.get_todo_type_display()}] {self.title}"
