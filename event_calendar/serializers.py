@@ -42,6 +42,8 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             "location",
             "status",
             "hold_reason",
+            "extension_request",
+            "completion_remarks",
             "assigned_to",
             "attendees",
             "attendee_ids",
@@ -130,7 +132,7 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
         if (
             instance.todo_type == "task"
             and instance.start
-            and instance.status not in ("completed", "on_hold", "approved")
+            and instance.status not in ("completed", "on_hold", "approved", "canceled")
         ):
             if instance.start < timezone.now():
                 data["status"] = "overdue"
@@ -148,6 +150,17 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         attendee_ids = validated_data.pop("attendee_ids", None)
+
+        new_status = validated_data.get("status")
+        start = validated_data.get("start")
+        if instance.status == "on_hold" and new_status and new_status != "on_hold":
+            validated_data["hold_reason"] = None
+        if instance.status == "overdue" and new_status and new_status != "overdue":
+            validated_data["extension_request"] = None
+        if instance.status == "completed" and new_status and new_status != "completed":
+            validated_data["completion_remarks"] = None
+        if instance.extension_request and start:
+            validated_data["extension_request"] = None
 
         for attr, value in validated_data.items():
             setattr(instance, attr, value)

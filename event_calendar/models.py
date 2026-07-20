@@ -45,6 +45,8 @@ class CalendarTodo(models.Model):
 
     status = models.CharField(max_length=20, blank=True, null=True)
     hold_reason = models.TextField(blank=True, null=True)
+    extension_request = models.TextField(blank=True, null=True)
+    completion_remarks = models.TextField(blank=True, null=True)
 
     location = models.CharField(max_length=255, blank=True, null=True)
 
@@ -69,6 +71,7 @@ class CalendarTodo(models.Model):
                 "completed",
                 "on_hold",
                 "approved",
+                "canceled",
             ):
                 self.status = "overdue"
             elif self.status == "overdue" and self.start > timezone.now():
