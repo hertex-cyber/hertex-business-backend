@@ -1,27 +1,132 @@
 from rest_framework import serializers
-from .models import Event
+from .models import CalendarTodo, MeetingAttendee
 
 
-class EventSerializer(serializers.ModelSerializer):
+class MeetingAttendeeSerializer(serializers.ModelSerializer):
+    user_name = serializers.SerializerMethodField()
+
     class Meta:
-        model = Event
+        model = MeetingAttendee
+        fields = ["id", "user", "user_name"]
+        read_only_fields = ["id"]
+
+    def get_user_name(self, obj):
+        user = obj.user
+        if user.first_name:
+            return f"{user.first_name} {user.last_name or ''}".strip()
+        return user.email
+
+
+class CalendarTodoSerializer(serializers.ModelSerializer):
+    attendees = MeetingAttendeeSerializer(many=True, read_only=True)
+    attendee_ids = serializers.ListField(
+        child=serializers.UUIDField(), write_only=True, required=False
+    )
+    assigned_to_name = serializers.SerializerMethodField()
+    contact_name = serializers.SerializerMethodField()
+    user_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CalendarTodo
         fields = [
             "id",
+            "user",
+            "todo_type",
             "title",
             "description",
+            "priority",
             "start",
             "end",
-            "is_all_day",
-            "priority",
+            "contact",
             "location",
+            "assigned_to",
+            "attendees",
+            "attendee_ids",
+            "assigned_to_name",
+            "contact_name",
+            "user_name",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        read_only_fields = ["id", "user", "created_at", "updated_at"]
+
+    def get_assigned_to_name(self, obj):
+        if not obj.assigned_to:
+            return None
+        user = obj.assigned_to
+        if user.first_name:
+            return f"{user.first_name} {user.last_name or ''}".strip()
+        return user.email
+
+    def get_contact_name(self, obj):
+        if not obj.contact:
+            return None
+        return obj.contact.name or obj.contact.email
+
+    def get_user_name(self, obj):
+        user = obj.user
+        if user.first_name:
+            return f"{user.first_name} {user.last_name or ''}".strip()
+        return user.email
 
     def validate(self, data):
+        todo_type = data.get("todo_type", getattr(self.instance, "todo_type", None))
+
+        if todo_type == "task":
+            if not data.get("start"):
+                raise serializers.ValidationError(
+                    {"start": "Deadline is required for tasks."}
+                )
+
+        elif todo_type == "event":
+            if not data.get("description"):
+                raise serializers.ValidationError(
+                    {"description": "Description is required for events."}
+                )
+            if not data.get("start"):
+                raise serializers.ValidationError(
+                    {"start": "Date is required for events."}
+                )
+
+        elif todo_type == "followup":
+            if not data.get("start"):
+                raise serializers.ValidationError(
+                    {"start": "Follow-up date is required."}
+                )
+
+        elif todo_type == "meeting":
+            if not data.get("start"):
+                raise serializers.ValidationError(
+                    {"start": "Date & time is required for meetings."}
+                )
+
         if data.get("start") and data.get("end") and data["start"] >= data["end"]:
             raise serializers.ValidationError(
                 {"end": "End time must be after start time."}
             )
+
         return data
+
+    def create(self, validated_data):
+        attendee_ids = validated_data.pop("attendee_ids", [])
+        todo = CalendarTodo.objects.create(**validated_data)
+
+        if todo.todo_type == "meeting" and attendee_ids:
+            for uid in attendee_ids:
+                MeetingAttendee.objects.create(todo=todo, user_id=uid)
+
+        return todo
+
+    def update(self, instance, validated_data):
+        attendee_ids = validated_data.pop("attendee_ids", None)
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        if attendee_ids is not None and instance.todo_type == "meeting":
+            instance.attendees.all().delete()
+            for uid in attendee_ids:
+                MeetingAttendee.objects.create(todo=instance, user_id=uid)
+
+        return instance
