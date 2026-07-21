@@ -80,6 +80,9 @@ class ContactViewSet(viewsets.ModelViewSet):
         batch_id = self.request.query_params.get("batch")
         if batch_id:
             qs = qs.filter(import_batch_id=batch_id)
+        assigned_user_id = self.request.query_params.get("assigned_user")
+        if assigned_user_id:
+            qs = qs.filter(crm_pipelines__assigned_user_id=assigned_user_id)
         return qs
 
     def perform_destroy(self, instance):
