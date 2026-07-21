@@ -76,6 +76,23 @@ class CalendarTodo(models.Model):
                 self.status = "overdue"
             elif self.status == "overdue" and self.start > timezone.now():
                 self.status = "assigned"
+
+        if self.todo_type == "event" and self.start:
+            if self.status not in ("cancelled",):
+                now = timezone.now()
+                if self.end:
+                    if self.end < now:
+                        self.status = "ended"
+                    elif self.start <= now <= self.end and self.status != "ended":
+                        self.status = "live"
+                    elif self.start > now:
+                        self.status = "upcoming"
+                else:
+                    if self.start < now and self.status != "ended":
+                        self.status = "ended"
+                    else:
+                        self.status = "upcoming"
+
         super().save(*args, **kwargs)
 
     def __str__(self):

@@ -12,10 +12,10 @@ class CalendarTodoViewSet(viewsets.ModelViewSet):
         user = self.request.user
 
         if user.role in ("Superadmin", "Admin"):
-            qs = CalendarTodo.objects.filter(user=user)
+            qs = CalendarTodo.objects.filter(Q(user=user) | Q(todo_type="event"))
         else:
             qs = CalendarTodo.objects.filter(
-                Q(assigned_to=user) | Q(attendees__user=user)
+                Q(assigned_to=user) | Q(attendees__user=user) | Q(todo_type="event")
             )
 
         qs = (
@@ -31,7 +31,11 @@ class CalendarTodoViewSet(viewsets.ModelViewSet):
         start = self.request.query_params.get("start")
         end = self.request.query_params.get("end")
         if start and end:
-            qs = qs.filter(start__gte=start, start__lte=end)
+            base_q = Q(start__gte=start, start__lte=end)
+            event_span_q = Q(
+                todo_type="event", start__lt=end, end__isnull=False, end__gte=start
+            )
+            qs = qs.filter(base_q | event_span_q)
         else:
             if start:
                 qs = qs.filter(start__gte=start)

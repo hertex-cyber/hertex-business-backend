@@ -107,6 +107,16 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"start": "Date is required for events."}
                 )
+            status = data.get("status")
+            if status and status not in (
+                "upcoming",
+                "live",
+                "cancelled",
+                "ended",
+            ):
+                raise serializers.ValidationError(
+                    {"status": f"Invalid status '{status}' for events."}
+                )
 
         elif todo_type == "followup":
             if start_missing or (self.instance is None and not data.get("start")):
@@ -129,6 +139,7 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
+
         if (
             instance.todo_type == "task"
             and instance.start
@@ -136,6 +147,26 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
         ):
             if instance.start < timezone.now():
                 data["status"] = "overdue"
+
+        if instance.todo_type == "event" and instance.start:
+            if instance.status not in ("cancelled",):
+                now = timezone.now()
+                if instance.end:
+                    if instance.end < now:
+                        data["status"] = "ended"
+                    elif (
+                        instance.start <= now <= instance.end
+                        and instance.status != "ended"
+                    ):
+                        data["status"] = "live"
+                    elif instance.start > now:
+                        data["status"] = "upcoming"
+                else:
+                    if instance.start < now and instance.status != "ended":
+                        data["status"] = "ended"
+                    else:
+                        data["status"] = "upcoming"
+
         return data
 
     def create(self, validated_data):
