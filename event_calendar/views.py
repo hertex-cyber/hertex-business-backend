@@ -12,7 +12,7 @@ class CalendarTodoViewSet(viewsets.ModelViewSet):
         user = self.request.user
 
         if user.role in ("Superadmin", "Admin"):
-            qs = CalendarTodo.objects.filter(Q(user=user) | Q(todo_type="event"))
+            qs = CalendarTodo.objects.all()
         else:
             qs = CalendarTodo.objects.filter(
                 Q(assigned_to=user) | Q(attendees__user=user) | Q(todo_type="event")

@@ -226,9 +226,12 @@ EMPLOYEE_ID_FORMAT = os.getenv("EMPLOYEE_ID_FORMAT", "EMP-{year}-{seq:04d}")
 # JWT Configuration
 from datetime import timedelta
 
+ACCESS_TOKEN_LIFETIME = timedelta(minutes=int(os.getenv("ACCESS_TOKEN_LIFETIME_MINUTES", "1440")))
+REFRESH_TOKEN_LIFETIME = timedelta(days=int(os.getenv("REFRESH_TOKEN_LIFETIME_DAYS", "30")))
+
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
+    "ACCESS_TOKEN_LIFETIME": ACCESS_TOKEN_LIFETIME,
+    "REFRESH_TOKEN_LIFETIME": REFRESH_TOKEN_LIFETIME,
     "ROTATE_REFRESH_TOKENS": False,
     "BLACKLIST_AFTER_ROTATION": False,
     "UPDATE_LAST_LOGIN": True,
@@ -254,6 +257,8 @@ SIMPLE_JWT = {
 
 # Security Settings
 # Configure dynamic cross-domain cookie security for decoupled frontend setups
+SESSION_COOKIE_AGE = int(os.getenv("SESSION_COOKIE_AGE", str(60 * 60 * 24 * 7)))
+SESSION_EXPIRE_AT_BROWSER_CLOSE = False
 SESSION_COOKIE_SECURE = not DEBUG
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax" if DEBUG else "None"

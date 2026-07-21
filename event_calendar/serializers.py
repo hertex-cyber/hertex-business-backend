@@ -44,6 +44,8 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             "hold_reason",
             "extension_request",
             "completion_remarks",
+            "followup_cancellation",
+            "followup_failed",
             "assigned_to",
             "attendees",
             "attendee_ids",
@@ -123,6 +125,16 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"start": "Follow-up date is required."}
                 )
+            status = data.get("status")
+            if status and status not in (
+                "follow_up",
+                "failed",
+                "complete",
+                "cancelled",
+            ):
+                raise serializers.ValidationError(
+                    {"status": f"Invalid status '{status}' for follow-ups."}
+                )
 
         elif todo_type == "meeting":
             if start_missing or (self.instance is None and not data.get("start")):
@@ -148,24 +160,14 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             if instance.start < timezone.now():
                 data["status"] = "overdue"
 
-        if instance.todo_type == "event" and instance.start:
-            if instance.status not in ("cancelled",):
-                now = timezone.now()
-                if instance.end:
-                    if instance.end < now:
-                        data["status"] = "ended"
-                    elif (
-                        instance.start <= now <= instance.end
-                        and instance.status != "ended"
-                    ):
-                        data["status"] = "live"
-                    elif instance.start > now:
-                        data["status"] = "upcoming"
-                else:
-                    if instance.start < now and instance.status != "ended":
-                        data["status"] = "ended"
-                    else:
-                        data["status"] = "upcoming"
+        if instance.todo_type == "followup" and instance.start:
+            if instance.start < timezone.now() and instance.status == "follow_up":
+                data["status"] = "failed"
+
+        if instance.todo_type == "event":
+            data["status"] = CalendarTodo.compute_event_status(
+                instance.start, instance.end, instance.status
+            )
 
         return data
 
@@ -190,6 +192,10 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             validated_data["extension_request"] = None
         if instance.status == "completed" and new_status and new_status != "completed":
             validated_data["completion_remarks"] = None
+        if instance.status == "cancelled" and new_status and new_status != "cancelled":
+            validated_data["followup_cancellation"] = None
+        if instance.status == "failed" and new_status and new_status != "failed":
+            validated_data["followup_failed"] = None
         if instance.extension_request and start:
             validated_data["extension_request"] = None
 

@@ -12,6 +12,13 @@ class CalendarTodo(models.Model):
         ("meeting", "Meeting"),
     ]
 
+    FOLLOWUP_STATUS_CHOICES = [
+        ("follow_up", "Follow Up"),
+        ("failed", "Failed"),
+        ("complete", "Complete"),
+        ("cancelled", "Cancelled"),
+    ]
+
     PRIORITY_CHOICES = [
         ("low", "Low"),
         ("medium", "Medium"),
@@ -47,6 +54,8 @@ class CalendarTodo(models.Model):
     hold_reason = models.TextField(blank=True, null=True)
     extension_request = models.TextField(blank=True, null=True)
     completion_remarks = models.TextField(blank=True, null=True)
+    followup_cancellation = models.TextField(blank=True, null=True)
+    followup_failed = models.TextField(blank=True, null=True)
 
     location = models.CharField(max_length=255, blank=True, null=True)
 
@@ -65,6 +74,24 @@ class CalendarTodo(models.Model):
         db_table = "event_calendar_todos"
         ordering = ["-created_at"]
 
+    @staticmethod
+    def compute_event_status(start, end, status):
+        if start and status not in ("cancelled",):
+            now = timezone.now()
+            if end:
+                if end < now:
+                    return "ended"
+                elif start <= now <= end and status != "ended":
+                    return "live"
+                elif start > now:
+                    return "upcoming"
+            else:
+                if start < now and status != "ended":
+                    return "ended"
+                else:
+                    return "upcoming"
+        return status
+
     def save(self, *args, **kwargs):
         if self.todo_type == "task" and self.start:
             if self.start < timezone.now() and self.status not in (
@@ -77,21 +104,12 @@ class CalendarTodo(models.Model):
             elif self.status == "overdue" and self.start > timezone.now():
                 self.status = "assigned"
 
-        if self.todo_type == "event" and self.start:
-            if self.status not in ("cancelled",):
-                now = timezone.now()
-                if self.end:
-                    if self.end < now:
-                        self.status = "ended"
-                    elif self.start <= now <= self.end and self.status != "ended":
-                        self.status = "live"
-                    elif self.start > now:
-                        self.status = "upcoming"
-                else:
-                    if self.start < now and self.status != "ended":
-                        self.status = "ended"
-                    else:
-                        self.status = "upcoming"
+        if self.todo_type == "followup" and self.start:
+            if self.start < timezone.now() and self.status == "follow_up":
+                self.status = "failed"
+
+        if self.todo_type == "event":
+            self.status = self.compute_event_status(self.start, self.end, self.status)
 
         super().save(*args, **kwargs)
 
