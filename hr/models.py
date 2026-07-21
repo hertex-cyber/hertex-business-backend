@@ -2665,10 +2665,12 @@ class OvertimeRequest(Main):
 
     def calculate_ot_hours(self):
         """Calculate OT hours from start/end time"""
-        from datetime import datetime, date as d
+        from datetime import datetime, date as d, timedelta
         if self.start_time and self.end_time:
             start = datetime.combine(d.today(), self.start_time)
             end = datetime.combine(d.today(), self.end_time)
+            if end <= start:
+                end += timedelta(days=1)
             diff = end - start
             self.ot_hours = round(diff.total_seconds() / 3600, 2)
         return self.ot_hours

@@ -185,6 +185,8 @@ class SalaryRevisionViewSet(viewsets.ModelViewSet):
     def reject(self, request, pk=None):
         """Reject salary revision."""
         revision = self.get_object()
+        if revision.status not in ['DRAFT', 'PENDING_MANAGER', 'PENDING_HR', 'PENDING_FINANCE']:
+            return Response({'error': 'Revision is not pending approval'}, status=status.HTTP_400_BAD_REQUEST)
         if request.user.role not in ['Superadmin', 'Admin', 'Finance'] and not self._is_manager_of_employee(revision):
             return Response({'error': 'Not authorized to reject this revision'}, status=status.HTTP_403_FORBIDDEN)
         revision.status = 'REJECTED'
@@ -250,10 +252,12 @@ class EmployeeLoanViewSet(viewsets.ModelViewSet):
         loan.save()
         return Response({'status': 'Loan approved'})
 
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsHRStaff])
     def reject(self, request, pk=None):
         """Reject a loan."""
         loan = self.get_object()
+        if loan.status != 'PENDING':
+            return Response({'error': 'Loan is not in pending status'}, status=status.HTTP_400_BAD_REQUEST)
         loan.status = 'REJECTED'
         loan.purpose = request.data.get('reason', loan.purpose or '')
         loan.save()
@@ -290,7 +294,14 @@ class LoanRepaymentViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_fields = ['loan', 'month', 'year', 'is_processed']
 
     def get_queryset(self):
-        return LoanRepayment.objects.select_related('loan__employee').all()
+        user = self.request.user
+        if user.role in ['Superadmin', 'Admin']:
+            return LoanRepayment.objects.select_related('loan__employee').all()
+        try:
+            employee = user.employee
+            return LoanRepayment.objects.filter(loan__employee=employee).select_related('loan__employee')
+        except:
+            return LoanRepayment.objects.none()
 
 
 class EmployeeReimbursementViewSet(viewsets.ModelViewSet):
@@ -327,10 +338,12 @@ class EmployeeReimbursementViewSet(viewsets.ModelViewSet):
         reimbursement.save()
         return Response({'status': 'Reimbursement approved'})
 
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsHRStaff])
     def reject(self, request, pk=None):
         """Reject a reimbursement."""
         reimbursement = self.get_object()
+        if reimbursement.status != 'PENDING':
+            return Response({'error': 'Reimbursement is not pending'}, status=status.HTTP_400_BAD_REQUEST)
         reimbursement.status = 'REJECTED'
         reimbursement.notes = request.data.get('reason', reimbursement.notes or '')
         reimbursement.save()
@@ -923,9 +936,12 @@ class EmployeeLeaveBalanceViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['get'])
     def current_year(self, request):
         """Get leave balances for current financial year for the logged-in employee"""
-        current_year = datetime.now().year
-        financial_year = f"{current_year-1}-{current_year}"
-        
+        today = datetime.now()
+        if today.month >= 4:
+            financial_year = f"{today.year}-{today.year + 1}"
+        else:
+            financial_year = f"{today.year - 1}-{today.year}"
+
         try:
             employee = request.user.employee
         except Exception:
@@ -1356,12 +1372,34 @@ class PayrollViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role in ['Superadmin', 'Admin']:
+        if user.role in ['Superadmin', 'Admin', 'Payroll Executive']:
             return Payroll.objects.select_related(
                 'employee', 'processed_by', 'approved_by'
             ).prefetch_related('components')
         else:
             return Payroll.objects.none()
+
+    def get_permissions(self):
+        if self.action in ['my_payslips', 'payslip', 'download_payslip']:
+            return [IsAuthenticated()]
+        return super().get_permissions()
+
+    def _get_payslip_payroll(self, request, pk):
+        """
+        Fetch a payroll record for payslip viewing, allowing payroll admins
+        to view anyone's and employees to view only their own.
+        """
+        payroll = Payroll.objects.select_related('employee').filter(pk=pk).first()
+        if not payroll:
+            return None
+
+        if request.user.role in ['Superadmin', 'Admin', 'Payroll Executive']:
+            return payroll
+
+        employee = getattr(request.user, 'employee', None)
+        if not employee or payroll.employee_id != employee.id:
+            raise PermissionDenied('You may only view your own payslip.')
+        return payroll
 
     @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated, CanProcessPayroll])
     def process_payroll(self, request):
@@ -1460,7 +1498,9 @@ class PayrollViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def download_payslip(self, request, pk=None):
         """Download payslip as PDF."""
-        payroll = self.get_object()
+        payroll = self._get_payslip_payroll(request, pk)
+        if not payroll:
+            return Response({'error': 'Payroll not found'}, status=status.HTTP_404_NOT_FOUND)
         generator = PaySlipGenerator(payroll)
         return generator.generate_response()
 
@@ -1515,7 +1555,9 @@ class PayrollViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def payslip(self, request, pk=None):
         """Get payslip data for a payroll record."""
-        payroll = self.get_object()
+        payroll = self._get_payslip_payroll(request, pk)
+        if not payroll:
+            return Response({'error': 'Payroll not found'}, status=status.HTTP_404_NOT_FOUND)
         serializer = PayrollSerializer(payroll)
         data = serializer.data
         
@@ -1666,8 +1708,8 @@ class PayrollViewSet(viewsets.ModelViewSet):
         """Generate bank transfer file (NEFT/RTGS)."""
         month = request.query_params.get('month')
         year = request.query_params.get('year')
-        file_format = request.query_params.get('format', 'NEFT')
-        
+        file_format = request.query_params.get('transfer_mode', 'NEFT')
+
         if not month or not year:
             return Response({'error': 'month and year required'}, status=status.HTTP_400_BAD_REQUEST)
         

@@ -26,6 +26,7 @@ from hr.models import (
     GratuityConfiguration, GratuityCalculation,
     BonusConfiguration, BonusCalculation,
     ComplianceCalendarEntry,
+    LWFConfiguration, LWFContribution,
     Attendance
 )
 
@@ -332,6 +333,25 @@ class GratuityComplianceService:
 class BonusComplianceService:
     """Bonus calculation under Payment of Bonus Act."""
 
+    def _compute_bonus_percentage(self, config: BonusConfiguration) -> Decimal:
+        """
+        Bonus % is allocable surplus / total eligible wage bill (Payment of
+        Bonus Act formula), clamped to the configured [minimum, maximum] band.
+        Falls back to the statutory minimum if there's no surplus or wage bill.
+        """
+        total_wage_bill = EmployeeSalary.objects.filter(
+            employee__status='ACTIVE',
+            is_active=True,
+            gross_salary__lte=config.wage_ceiling,
+        ).aggregate(total=Sum('gross_salary'))['total'] or Decimal('0')
+
+        if total_wage_bill <= 0 or config.allocable_surplus <= 0:
+            return config.minimum_bonus_pct
+
+        computed_pct = (config.allocable_surplus / total_wage_bill * Decimal('100'))
+        bonus_pct = max(config.minimum_bonus_pct, min(config.maximum_bonus_pct, computed_pct))
+        return bonus_pct.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
     def calculate_bonus(self, employee: Employee, financial_year: str) -> dict:
         """Calculate annual bonus."""
         config = BonusConfiguration.objects.filter(financial_year=financial_year, is_active=True).first()
@@ -342,8 +362,7 @@ class BonusComplianceService:
         if not salary or salary.gross_salary > config.wage_ceiling:
             return {'amount': Decimal('0'), 'eligible': False}
 
-        # Minimum bonus: 8.33% of eligible salary
-        bonus_pct = max(config.minimum_bonus_pct, min(config.maximum_bonus_pct, Decimal('8.33')))
+        bonus_pct = self._compute_bonus_percentage(config)
         bonus_amount = (salary.gross_salary * bonus_pct / Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
         return {

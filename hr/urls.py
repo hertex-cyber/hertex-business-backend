@@ -185,10 +185,6 @@ router.register(r'data-retention', DataRetentionViewSet, basename='data-retentio
 
 app_name = 'hr'
 
-urlpatterns = [
-    path('', include(router.urls)),
-]
-
 # PMS Enhancement: Goal Library, Rating Scales, Form Designer
 router.register(r'goal-library', GoalLibraryViewSet, basename='goal-library')
 router.register(r'rating-scales', RatingScaleViewSet, basename='rating-scale')
@@ -216,4 +212,8 @@ router.register(r'salary-freezes', SalaryFreezeViewSet, basename='salary-freeze'
 
 # Bulk Salary Revision Upload
 router.register(r'bulk-salary-revisions', BulkSalaryRevisionUploadViewSet, basename='bulk-salary-revision')
+
+urlpatterns = [
+    path('', include(router.urls)),
+]
 

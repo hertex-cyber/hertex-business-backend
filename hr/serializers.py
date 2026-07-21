@@ -280,7 +280,9 @@ class PayrollSerializer(serializers.ModelSerializer):
                   'status', 'bank_transfer_date', 'transaction_id', 'processed_by', 'processed_by_name',
                   'processed_date', 'approved_by', 'approved_by_name', 'approved_date', 'remarks',
                   'components', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'payroll_period', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'payroll_period', 'status', 'processed_by', 'processed_date',
+                            'approved_by', 'approved_date', 'bank_transfer_date', 'transaction_id',
+                            'created_at', 'updated_at']
 
 
 class HolidaySerializer(serializers.ModelSerializer):
@@ -423,7 +425,9 @@ class SalaryRevisionSerializer(serializers.ModelSerializer):
     class Meta:
         model = SalaryRevision
         fields = '__all__'
-        read_only_fields = ['id', 'percentage_increase', 'is_processed', 'arrears_amount', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'percentage_increase', 'is_processed', 'arrears_amount',
+                            'status', 'approved_by_manager', 'approved_by_hr', 'approved_by_finance',
+                            'approved_date', 'processed_in_payroll', 'created_at', 'updated_at']
 
 
 class SalaryRevisionListSerializer(serializers.ModelSerializer):
@@ -450,7 +454,9 @@ class EmployeeLoanSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmployeeLoan
         fields = '__all__'
-        read_only_fields = ['id', 'paid_amount', 'paid_emis', 'outstanding_amount', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'paid_amount', 'paid_emis', 'outstanding_amount',
+                            'status', 'approved_by', 'approved_date', 'closure_date',
+                            'created_at', 'updated_at']
 
 
 class EmployeeLoanListSerializer(serializers.ModelSerializer):
@@ -483,7 +489,8 @@ class EmployeeReimbursementSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmployeeReimbursement
         fields = '__all__'
-        read_only_fields = ['id', 'applied_date', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'applied_date', 'status', 'approved_by', 'approved_date',
+                            'payroll', 'paid_date', 'created_at', 'updated_at']
 
 
 class EmployeeReimbursementListSerializer(serializers.ModelSerializer):
@@ -575,7 +582,7 @@ class OvertimeRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = OvertimeRequest
         fields = '__all__'
-        read_only_fields = ['id', 'ot_amount', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'employee', 'ot_amount', 'created_at', 'updated_at']
 
 
 class ShiftSwapRequestSerializer(serializers.ModelSerializer):
@@ -590,7 +597,7 @@ class ShiftSwapRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = ShiftSwapRequest
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'requesting_employee', 'created_at', 'updated_at']
 
 
 class AttendanceRegularizationRequestSerializer(serializers.ModelSerializer):
@@ -601,7 +608,7 @@ class AttendanceRegularizationRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = AttendanceRegularizationRequest
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'employee', 'created_at', 'updated_at']
 
 
 

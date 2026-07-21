@@ -17,7 +17,7 @@ from typing import Optional, List, Tuple
 
 from django.db import transaction
 from django.utils import timezone
-from django.db.models import Sum, Q, F
+from django.db.models import Sum, Q, F, Count
 
 
 
@@ -34,7 +34,11 @@ from hr.models import (
     ComplianceCalendarEntry,
     EmployeeLoan, LoanRepayment,
     SalaryRevision,
+    LWFConfiguration, LWFContribution,
+    OvertimeRequest,
 )
+
+STANDARD_HOURS_PER_DAY = Decimal('8')
 
 
 # ============================================================================
@@ -138,6 +142,13 @@ class PayrollEngine:
         self._tds_config = None
         self._gratuity_config = None
 
+    def _ytd_filter_in_fy(self) -> Q:
+        """Q filter for prior months within the current financial year (excludes this month)."""
+        fy_start = get_financial_year_start(date(self.year, self.month, 1))
+        if fy_start.year == self.year:
+            return Q(year=self.year, month__gte=fy_start.month, month__lt=self.month)
+        return Q(year=fy_start.year, month__gte=fy_start.month) | Q(year=self.year, month__lt=self.month)
+
     # ------------------------------------------------------------------
     # 1. ATTENDANCE-BASED SALARY COMPUTATION
     # ------------------------------------------------------------------
@@ -225,21 +236,25 @@ class PayrollEngine:
             'wfh_days': wfh,
         }
 
-    def calculate_gross_for_month(self, attendance_summary: dict = None) -> Decimal:
-        """Calculate gross salary for the month based on attendance."""
+    def get_attendance_ratio(self, attendance_summary: dict = None) -> Decimal:
+        """Fraction of the monthly salary payable based on attendance (1 = full month)."""
         if attendance_summary is None:
             attendance_summary = self.get_attendance_summary()
-        
-        monthly_gross = self.salary.gross_salary
+
         base_days = self.working_days if self.working_days > 0 else 30
-        
-        # Pro-rate based on presence
         present_weight = attendance_summary['present_days']
-        
+
         if present_weight < base_days:
-            ratio = present_weight / Decimal(str(base_days))
+            return present_weight / Decimal(str(base_days))
+        return Decimal('1')
+
+    def calculate_gross_for_month(self, attendance_summary: dict = None) -> Decimal:
+        """Calculate gross salary for the month based on attendance."""
+        monthly_gross = self.salary.gross_salary
+        ratio = self.get_attendance_ratio(attendance_summary)
+
+        if ratio < Decimal('1'):
             return (monthly_gross * ratio).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        
         return Decimal(str(monthly_gross))
 
     # ------------------------------------------------------------------
@@ -403,11 +418,10 @@ class PayrollEngine:
         if not config:
             return {'current_month_tds': Decimal('0')}
         
-        # Get YTD data
+        # Get YTD data (prior months within this financial year)
         ytd_payroll = Payroll.objects.filter(
+            self._ytd_filter_in_fy(),
             employee=self.employee,
-            year=self.year,
-            month__lt=self.month,
             status__in=['PROCESSED', 'APPROVED', 'PAID'],
         ).aggregate(
             gross=Sum('gross_salary'),
@@ -444,8 +458,11 @@ class PayrollEngine:
         else:
             standard_deduction = config.standard_deduction_new
             
-        # Annual projections (extrapolate from YTD + this month)
-        remaining_months = 12 - self.month
+        # Annual projections (extrapolate from YTD + this month), based on the
+        # financial year (Apr-Mar), not the calendar year
+        fy_start = get_financial_year_start(date(self.year, self.month, 1))
+        months_elapsed_in_fy = (self.year - fy_start.year) * 12 + (self.month - fy_start.month) + 1
+        remaining_months = 12 - months_elapsed_in_fy
         projected_annual = annual_gross + (projected_annual_gross * Decimal(str(remaining_months)))
         
         # Taxable income calculation
@@ -521,14 +538,14 @@ class PayrollEngine:
         
         # Calculate this month's TDS
         ytd_tax = TDSCalculation.objects.filter(
+            self._ytd_filter_in_fy(),
             employee=self.employee,
             financial_year=self.financial_year,
-            month__lt=self.month,
         ).aggregate(total=Sum('current_month_tds'))
         ytd_tds_deducted = ytd_tax.get('total') or Decimal('0')
         
         remaining_months_tax = total_annual_tax - ytd_tds_deducted
-        months_left = max(12 - self.month + 1, 1)
+        months_left = max(12 - months_elapsed_in_fy + 1, 1)
         current_month_tds = max(
             (remaining_months_tax / Decimal(str(months_left))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP),
             Decimal('0')
@@ -561,6 +578,57 @@ class PayrollEngine:
             'gratuity_amount': (gratuity_per_year * Decimal(str(years_served))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP),
         }
 
+    def calculate_lwf(self) -> dict:
+        """
+        Calculate Labour Welfare Fund contribution for the month.
+
+        LWF is deducted in a lump sum on the last month of its period
+        (June for Jan-Jun, December for Jul-Dec, March FY-end for annual
+        configs), not spread across every month.
+        """
+        not_applicable = {
+            'is_applicable': False,
+            'employee_contribution': Decimal('0'),
+            'employer_contribution': Decimal('0'),
+            'period': None,
+            'state': None,
+            'config_id': None,
+        }
+
+        state = self.employee.work_location.state if self.employee.work_location else None
+        if not state:
+            return not_applicable
+
+        config = LWFConfiguration.objects.filter(
+            state=state,
+            effective_from__lte=date(self.year, self.month, 1),
+            is_active=True,
+        ).filter(
+            Q(effective_to__isnull=True) | Q(effective_to__gte=date(self.year, self.month, 1))
+        ).order_by('-effective_from').first()
+
+        if not config:
+            return not_applicable
+
+        if config.frequency == 'ANNUAL':
+            period = 'ANNUAL'
+            deduction_month = 3  # financial year end
+        else:  # HALF_YEARLY (and MONTHLY, which this schema doesn't distinctly support)
+            period = 'JAN_JUN' if self.month <= 6 else 'JUL_DEC'
+            deduction_month = 6 if period == 'JAN_JUN' else 12
+
+        if self.month != deduction_month:
+            return not_applicable
+
+        return {
+            'is_applicable': True,
+            'employee_contribution': config.employee_contribution,
+            'employer_contribution': config.employer_contribution,
+            'period': period,
+            'state': state,
+            'config_id': config.id,
+        }
+
     # ------------------------------------------------------------------
     # 3. LOAN & ADVANCE DEDUCTIONS
     # ------------------------------------------------------------------
@@ -574,8 +642,9 @@ class PayrollEngine:
         """
         active_loans = EmployeeLoan.objects.filter(
             employee=self.employee,
-            status='APPROVED',
+            status__in=['APPROVED', 'ACTIVE'],
             is_active=True,
+            outstanding_amount__gt=0,
         )
         deductions = []
         for loan in active_loans:
@@ -587,10 +656,12 @@ class PayrollEngine:
                     year=self.year,
                 ).exists()
                 if not repayment_exists:
+                    # Cap the final EMI to whatever balance remains
+                    emi_amount = min(loan.emi_amount, loan.outstanding_amount)
                     deductions.append({
                         'loan_id': str(loan.id),
                         'loan_type': loan.loan_type,
-                        'emi_amount': loan.emi_amount,
+                        'emi_amount': emi_amount,
                         'outstanding': loan.outstanding_amount,
                     })
         return deductions
@@ -627,56 +698,70 @@ class PayrollEngine:
         
         # 1. Attendance summary
         attendance = self.get_attendance_summary()
-        
-        # 2. Calculate gross salary (attendance-pro-rated)
-        computed_gross = self.calculate_gross_for_month(attendance)
+        attendance_ratio = self.get_attendance_ratio(attendance)
 
-        # 2b. Auto-push night shift allowance
-        computed_gross, night_shift_allowance = self._add_night_shift_allowance(computed_gross)
+        # 2. Calculate gross salary (attendance-pro-rated, before night shift)
+        pro_rated_gross = self.calculate_gross_for_month(attendance)
 
-        # 3. Calculate earnings components
-        component_earnings = self._compute_component_breakdown(computed_gross)
-        
+        # 2b. Auto-push night shift allowance (additive, not part of the pro-ration base)
+        computed_gross, night_shift_allowance = self._add_night_shift_allowance(pro_rated_gross)
+
+        # 2c. Overtime pay for approved, unprocessed OT requests this month
+        ot_requests, ot_amount = self._get_overtime_pay()
+        computed_gross += ot_amount
+
+        # 3. Calculate earnings components (pro-rated against attendance only, not OT/night-shift)
+        component_earnings = self._compute_component_breakdown(pro_rated_gross)
+
         # 4. Calculate statutory deductions
-        basic_da = self.salary.basic_salary
+        basic_da = (self.salary.basic_salary * attendance_ratio).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) \
+            if attendance_ratio < Decimal('1') else self.salary.basic_salary
         pf = self.calculate_pf(basic_da)
         esi = self.calculate_esi(computed_gross)
         pt = self.calculate_pt(computed_gross)
-        
+        lwf = self.calculate_lwf()
+
         # 5. Calculate TDS
         tds = self.calculate_tds(computed_gross)
-        
+
         # 6. Calculate loan deductions
         loan_deductions = self.calculate_loan_deductions()
         total_loan_emi = sum(d['emi_amount'] for d in loan_deductions)
-        
+
         # 7. Calculate gratuity provision
         gratuity = self.calculate_gratuity()
-        
+
         # 8. Total deductions
         total_statutory = (
-            pf['employee_pf'] + 
-            esi['employee_contribution'] + 
-            pt['pt_amount'] + 
-            tds['current_month_tds']
+            pf['employee_pf'] +
+            esi['employee_contribution'] +
+            pt['pt_amount'] +
+            tds['current_month_tds'] +
+            lwf['employee_contribution']
         )
         total_deductions = total_statutory + total_loan_emi
-        
+
         # 9. Net salary
         net_salary = max(computed_gross - total_deductions, Decimal('0'))
-        
-        # 10. Arrears (check for pending salary revisions)
+
+        # 10. Arrears (check for pending salary revisions, including backdated multi-month ones)
         arrears = Decimal('0')
         pending_revisions = SalaryRevision.objects.filter(
             employee=self.employee,
-            effective_month__lte=self.month,
-            effective_year__lte=self.year,
             status='APPROVED',
             is_processed=False,
+        ).filter(
+            Q(effective_year__lt=self.year) |
+            Q(effective_year=self.year, effective_month__lte=self.month)
         )
+        revision_arrears = {}
         for rev in pending_revisions:
-            arrears += (rev.revised_gross - rev.previous_gross) or Decimal('0')
-        
+            months_pending = (self.year - rev.effective_year) * 12 + (self.month - rev.effective_month) + 1
+            monthly_delta = (rev.revised_gross - rev.previous_gross) or Decimal('0')
+            rev_arrears = (monthly_delta * months_pending).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            revision_arrears[rev.id] = rev_arrears
+            arrears += rev_arrears
+
         final_salary = net_salary + arrears
         
         status = 'DRAFT' if is_test_mode else 'PROCESSED'
@@ -803,7 +888,22 @@ class PayrollEngine:
             }
         )
         
-        # Create loan repayments
+        # Save LWF contribution (only non-zero on the deduction month for the period)
+        if lwf['is_applicable']:
+            LWFContribution.objects.update_or_create(
+                employee=self.employee,
+                period=lwf['period'],
+                year=self.year,
+                defaults={
+                    'payroll': payroll,
+                    'config_id': lwf['config_id'],
+                    'state': lwf['state'],
+                    'employee_contribution': lwf['employee_contribution'],
+                    'employer_contribution': lwf['employer_contribution'],
+                }
+            )
+
+        # Create loan repayments and close loans that are fully paid off
         for loan_ded in loan_deductions:
             LoanRepayment.objects.create(
                 loan_id=loan_ded['loan_id'],
@@ -812,17 +912,29 @@ class PayrollEngine:
                 year=self.year,
                 payroll=payroll,
             )
-            # Update loan outstanding
-            EmployeeLoan.objects.filter(id=loan_ded['loan_id']).update(
-                paid_amount=F('paid_amount') + loan_ded['emi_amount'],
-                outstanding_amount=F('outstanding_amount') - loan_ded['emi_amount'],
-            )
-        
-        # Mark salary revisions as processed
+            loan = EmployeeLoan.objects.filter(id=loan_ded['loan_id']).first()
+            loan.paid_amount = loan.paid_amount + loan_ded['emi_amount']
+            loan.outstanding_amount = loan.outstanding_amount - loan_ded['emi_amount']
+            loan.paid_emis = F('paid_emis') + 1
+            if loan.outstanding_amount <= 0:
+                loan.outstanding_amount = Decimal('0')
+                loan.status = 'CLOSED'
+                loan.closure_date = date(self.year, self.month, 1)
+            loan.save()
+
+        # Mark OT requests as processed in this payroll
+        for ot in ot_requests:
+            ot.status = 'PROCESSED'
+            ot.payroll = payroll
+            ot.save()
+
+        # Mark salary revisions as processed and persist their computed arrears
         for rev in pending_revisions:
             rev.is_processed = True
+            rev.arrears_amount = revision_arrears.get(rev.id, Decimal('0'))
+            rev.processed_in_payroll = payroll
             rev.save()
-        
+
         return {
             'status': status,
             'payroll_id': str(payroll.id),
@@ -834,7 +946,9 @@ class PayrollEngine:
             'esi_employee': float(esi['employee_contribution']),
             'pt': float(pt['pt_amount']),
             'tds': float(tds['current_month_tds']),
+            'lwf': float(lwf['employee_contribution']),
             'loan_deductions': float(total_loan_emi),
+            'overtime_pay': float(ot_amount),
             'net_salary': float(net_salary),
             'arrears': float(arrears),
             'final_salary': float(final_salary),
@@ -879,12 +993,42 @@ class PayrollEngine:
         
         return components
 
-    def _get_ytd_gross(self) -> Decimal:
-        """Get YTD gross salary for TDS calculation."""
-        ytd = Payroll.objects.filter(
+    def _get_overtime_pay(self) -> tuple:
+        """
+        Fetch approved, unprocessed overtime requests for this month and
+        compute their pay amount.
+
+        Returns:
+            tuple: (list of OvertimeRequest instances, total ot_amount)
+        """
+        requests = list(OvertimeRequest.objects.filter(
             employee=self.employee,
-            year=self.year,
-            month__lt=self.month,
+            date__month=self.month,
+            date__year=self.year,
+            status='APPROVED',
+        ))
+        if not requests:
+            return [], Decimal('0')
+
+        per_day_rate = self.salary.basic_salary / Decimal(str(self.working_days)) \
+            if self.working_days > 0 else Decimal('0')
+        hourly_rate = per_day_rate / STANDARD_HOURS_PER_DAY
+
+        total = Decimal('0')
+        for req in requests:
+            amount = (Decimal(str(req.ot_hours)) * hourly_rate * req.ot_rate_multiplier).quantize(
+                Decimal('0.01'), rounding=ROUND_HALF_UP
+            )
+            req.ot_amount = amount
+            total += amount
+
+        return requests, total
+
+    def _get_ytd_gross(self) -> Decimal:
+        """Get YTD gross salary for TDS calculation (prior months within this financial year)."""
+        ytd = Payroll.objects.filter(
+            self._ytd_filter_in_fy(),
+            employee=self.employee,
             status__in=['PROCESSED', 'APPROVED', 'PAID'],
         ).aggregate(total=Sum('gross_salary'))
         return ytd.get('total') or Decimal('0')
@@ -1018,13 +1162,14 @@ class PayrollReportGenerator:
         self.month = month
         self.year = year
     
-    def salary_register(self, status: str = 'APPROVED') -> list:
+    def salary_register(self, status: str = None) -> list:
         """Generate detailed salary register."""
-        payrolls = Payroll.objects.filter(
-            month=self.month,
-            year=self.year,
-            status=status,
-        ).select_related('employee', 'processed_by', 'approved_by').prefetch_related('components')
+        payrolls = Payroll.objects.filter(month=self.month, year=self.year)
+        if status:
+            payrolls = payrolls.filter(status=status)
+        else:
+            payrolls = payrolls.filter(status__in=['PROCESSED', 'APPROVED', 'PAID'])
+        payrolls = payrolls.select_related('employee', 'processed_by', 'approved_by').prefetch_related('components')
         
         register = []
         for payroll in payrolls:
@@ -1058,8 +1203,6 @@ class PayrollReportGenerator:
     
     def department_wise_summary(self) -> list:
         """Generate department-wise payroll cost summary."""
-        from django.db.models import Sum, Avg, Count
-        
         payrolls = Payroll.objects.filter(
             month=self.month,
             year=self.year,
