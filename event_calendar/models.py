@@ -26,6 +26,23 @@ class CalendarTodo(models.Model):
         ("cancelled", "Cancelled"),
     ]
 
+    EVENT_STATUS_CHOICES = [
+        ("upcoming", "Upcoming"),
+        ("live", "Live"),
+        ("ended", "Ended"),
+        ("cancelled", "Cancelled"),
+    ]
+
+    TASK_STATUS_CHOICES = [
+        ("assigned", "Assigned"),
+        ("progress", "Progress"),
+        ("completed", "Completed"),
+        ("canceled", "Canceled"),
+        ("on_hold", "On Hold"),
+        ("overdue", "Overdue"),
+        ("approved", "Approved"),
+    ]
+
     PRIORITY_CHOICES = [
         ("low", "Low"),
         ("medium", "Medium"),

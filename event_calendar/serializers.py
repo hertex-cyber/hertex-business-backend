@@ -87,15 +87,8 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                     {"start": "Deadline is required for tasks."}
                 )
             status = data.get("status")
-            if status and status not in (
-                "assigned",
-                "progress",
-                "completed",
-                "canceled",
-                "on_hold",
-                "overdue",
-                "approved",
-            ):
+            valid_statuses = [s[0] for s in CalendarTodo.TASK_STATUS_CHOICES]
+            if status and status not in valid_statuses:
                 raise serializers.ValidationError(
                     {"status": f"Invalid status '{status}' for tasks."}
                 )
@@ -110,12 +103,8 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                     {"start": "Date is required for events."}
                 )
             status = data.get("status")
-            if status and status not in (
-                "upcoming",
-                "live",
-                "cancelled",
-                "ended",
-            ):
+            valid_statuses = [s[0] for s in CalendarTodo.EVENT_STATUS_CHOICES]
+            if status and status not in valid_statuses:
                 raise serializers.ValidationError(
                     {"status": f"Invalid status '{status}' for events."}
                 )
@@ -126,12 +115,8 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                     {"start": "Follow-up date is required."}
                 )
             status = data.get("status")
-            if status and status not in (
-                "follow_up",
-                "failed",
-                "complete",
-                "cancelled",
-            ):
+            valid_statuses = [s[0] for s in CalendarTodo.FOLLOWUP_STATUS_CHOICES]
+            if status and status not in valid_statuses:
                 raise serializers.ValidationError(
                     {"status": f"Invalid status '{status}' for follow-ups."}
                 )
