@@ -83,6 +83,14 @@ class CalendarTodo(models.Model):
 
     location = models.CharField(max_length=255, blank=True, null=True)
 
+    pipeline = models.ForeignKey(
+        "crm.Pipeline",
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="followups",
+    )
+
     assigned_to = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

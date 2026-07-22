@@ -25,6 +25,7 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
     )
     assigned_to_name = serializers.SerializerMethodField()
     contact_name = serializers.SerializerMethodField()
+    pipeline_name = serializers.SerializerMethodField()
     user_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -39,6 +40,8 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             "start",
             "end",
             "contact",
+            "pipeline",
+            "pipeline_name",
             "location",
             "status",
             "hold_reason",
@@ -69,6 +72,11 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
         if not obj.contact:
             return None
         return obj.contact.name or obj.contact.email
+
+    def get_pipeline_name(self, obj):
+        if not obj.pipeline:
+            return None
+        return obj.pipeline.name
 
     def get_user_name(self, obj):
         user = obj.user

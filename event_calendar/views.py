@@ -19,7 +19,7 @@ class CalendarTodoViewSet(viewsets.ModelViewSet):
             )
 
         qs = (
-            qs.select_related("assigned_to", "contact")
+            qs.select_related("assigned_to", "contact", "pipeline")
             .prefetch_related("attendees__user")
             .distinct()
         )
@@ -27,6 +27,10 @@ class CalendarTodoViewSet(viewsets.ModelViewSet):
         todo_type = self.request.query_params.get("todo_type")
         if todo_type:
             qs = qs.filter(todo_type=todo_type)
+
+        pipeline = self.request.query_params.get("pipeline")
+        if pipeline:
+            qs = qs.filter(pipeline_id=pipeline)
 
         start = self.request.query_params.get("start")
         end = self.request.query_params.get("end")
