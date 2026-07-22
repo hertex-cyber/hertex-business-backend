@@ -50,6 +50,7 @@ Many-to-many relationship between meetings and users.
 - Status defaults to auto-calculated by `save()` and `to_representation()`
 
 **Auto-status (written on save + overridden on read):**
+- `overdue` is NOT available in the status dropdown — it's auto-set only (same pattern as `failed` for follow-ups)
 - If `start < now` and status NOT in `(completed, on_hold, approved, canceled)` → auto-set to `overdue`
 - If `status == "overdue"` and `start > now` → auto-revert to `assigned`
 
@@ -158,16 +159,51 @@ Many-to-many relationship between meetings and users.
 
 ### 4. Meeting (`todo_type: "meeting"`)
 
-**Creation:**
-- Required: Title, Date & Time
-- Optional: Agenda, Location/Link, Attendees (multi-select from users)
+**Statuses:** `upcoming`, `live`, `ended`, `cancelled`
+
+**Creation (AddEventModal → Meetings tab):**
+- Required: Title, Date, Start Time, End Time
+- Optional: Agenda, Location/Link, Status, Attendees (multi-select from users)
+- Title and Status in a 2-column grid at the top
+- Date/Start Time/End Time in a 3-column grid
 - Attendees stored via `MeetingAttendee` model
 
-**Behavior:**
-- No status tracking
-- Attendees are stored separately and returned in the API
+**Auto-status (written on save + overridden on read):**
+- Same logic as events via `compute_event_status()`:
+  - `cancelled` is never auto-overridden
+  - `end < now` → `ended`
+  - `start <= now <= end` → `live`
+  - `start > now` → `upcoming`
+
+**UI (UpdateMeetingModal):**
+- Title and Status side by side in a 2-column grid
+- Status dropdown has 4 color-coded options (same as events)
+- Only creator can edit; others see read-only
+
+**Card (MeetingCard):**
+- Single badge with status-specific text + color:
+  - `upcoming` → blue "Meeting" badge
+  - `live` → green "Live" badge
+  - `ended` → muted "Ended" badge
+  - `cancelled` → red "Cancelled" badge
+- Card background is always the same (no green tint for live)
 
 ---
+
+### Status Constants
+
+Each todo type has a dedicated `STATUS_CHOICES` constant on the `CalendarTodo` model:
+
+| Constant | Type | Values |
+|----------|------|--------|
+| `FOLLOWUP_STATUS_CHOICES` | Follow-up | `follow_up`, `failed`, `complete`, `cancelled` |
+| `MEETING_STATUS_CHOICES` | Meeting | `upcoming`, `live`, `ended`, `cancelled` |
+| `EVENT_STATUS_CHOICES` | Event | `upcoming`, `live`, `ended`, `cancelled` |
+| `TASK_STATUS_CHOICES` | Task | `assigned`, `progress`, `completed`, `canceled`, `on_hold`, `overdue`, `approved` |
+
+All serializer validation references these constants via `[s[0] for s in CalendarTodo.<TYPE>_STATUS_CHOICES]`.
+
+The frontend mirrors these in `constants.js` with `*_STATUS_OPTIONS` (for dropdowns), `*_STATUS_STYLES` (for badge CSS), and helper functions (`get*StatusTextColor`, `get*StatusDropdownItemStyle`, `get*StatusDotColor`).
 
 ## Backend Architecture
 
