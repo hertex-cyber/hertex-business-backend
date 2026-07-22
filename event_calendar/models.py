@@ -19,6 +19,13 @@ class CalendarTodo(models.Model):
         ("cancelled", "Cancelled"),
     ]
 
+    MEETING_STATUS_CHOICES = [
+        ("upcoming", "Upcoming"),
+        ("live", "Live"),
+        ("ended", "Ended"),
+        ("cancelled", "Cancelled"),
+    ]
+
     PRIORITY_CHOICES = [
         ("low", "Low"),
         ("medium", "Medium"),
@@ -108,7 +115,7 @@ class CalendarTodo(models.Model):
             if self.start < timezone.now() and self.status == "follow_up":
                 self.status = "failed"
 
-        if self.todo_type == "event":
+        if self.todo_type in ("event", "meeting"):
             self.status = self.compute_event_status(self.start, self.end, self.status)
 
         super().save(*args, **kwargs)

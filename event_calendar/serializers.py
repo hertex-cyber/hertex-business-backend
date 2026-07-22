@@ -141,6 +141,12 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"start": "Date & time is required for meetings."}
                 )
+            status = data.get("status")
+            valid_statuses = [s[0] for s in CalendarTodo.MEETING_STATUS_CHOICES]
+            if status and status not in valid_statuses:
+                raise serializers.ValidationError(
+                    {"status": f"Invalid status '{status}' for meetings."}
+                )
 
         if data.get("start") and data.get("end") and data["start"] >= data["end"]:
             raise serializers.ValidationError(
@@ -164,7 +170,7 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             if instance.start < timezone.now() and instance.status == "follow_up":
                 data["status"] = "failed"
 
-        if instance.todo_type == "event":
+        if instance.todo_type in ("event", "meeting"):
             data["status"] = CalendarTodo.compute_event_status(
                 instance.start, instance.end, instance.status
             )

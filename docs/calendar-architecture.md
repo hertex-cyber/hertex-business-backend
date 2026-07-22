@@ -24,7 +24,9 @@ The calendar module manages 4 types of calendar entries: **Tasks**, **Events**, 
 | `status` | CharField(20) | All | Type-specific status values |
 | `hold_reason` | TextField | Task | Why task was put on hold |
 | `extension_request` | TextField | Task | Text requesting deadline extension |
-| `completion_remarks` | TextField | Task | Notes on completion |
+| `completion_remarks` | TextField | Task, Follow-up | Notes on completion |
+| `followup_cancellation` | TextField | Follow-up | Reason for cancellation |
+| `followup_failed` | TextField | Follow-up | Reason follow-up failed |
 | `location` | CharField(255) | Meeting | Venue or meeting link |
 | `assigned_to` | FK→User | Task, Follow-up | Assignee |
 | `created_at` | DateTime | All | Auto-set on creation |
@@ -114,14 +116,43 @@ Many-to-many relationship between meetings and users.
 
 ### 3. Follow-up (`todo_type: "followup"`)
 
-**Creation:**
-- Required: Title, Contact, Follow-Up Date
-- Optional: Notes, Assign To
+**Statuses:** `follow_up`, `failed`, `complete`, `cancelled`
 
-**Behavior:**
-- Minimal workflow — no status tracking, no auto-overdue
-- Tied to a Contact record
-- Can be assigned to a team member
+**Creation (AddEventModal → Follow-up tab):**
+- Required: Title, Follow-Up Date
+- Optional: Notes, Assign To, Contact, Status
+- Status defaults to `follow_up`
+- Contact dropdown disabled until a user is assigned in Assign To
+- Contacts load server-side filtered by CRM deals assigned to the assigned user (`?assigned_user=ID` or `?search=term`)
+- Admin/Superadmin users see all contacts regardless of CRM assignment
+
+**Auto-status (written on save + overridden on read):**
+- If `start < now` and status is `follow_up` → auto-set to `failed`
+- `failed` is NOT available in the status dropdown — it's auto-set only
+
+**Status update cleanup (serializer `update`):**
+- Leaving `cancelled` → `followup_cancellation` cleared
+- Leaving `failed` → `followup_failed` cleared
+- Leaving `complete` → `completion_remarks` cleared
+
+**UI (UpdateFollowUpModal):**
+- Permission tiers:
+  - `isCreator`: Full edit (title, notes, contact, assign_to, date)
+  - `isAssignee`: Can edit status + mini PATCH flows only
+  - Others: Read-only with banner
+- Status field disabled for assignee when status is `failed` (auto-set only)
+- Non-admin creator: Assign To disabled, auto-set to logged-in user
+- Admin creator: Assign To editable with dropdown
+- Assignee-only mini PATCH flows (same pattern as tasks):
+  - **Cancelled**: requires cancellation reason (`followup_cancellation`)
+  - **Failed**: requires failed reason (`followup_failed`)
+  - **Complete**: requires completion remarks (`completion_remarks`)
+  - Creator sees these fields as read-only
+- Contact dropdown: loads server-side filtered by assigned user's CRM deals; admin/superadmin users see all contacts
+
+**Card (FollowUpCard):**
+- Shows status badge (pink=follow_up, red=failed, green=complete, grey=cancelled)
+- `failed` status: card background turns red (same as overdue tasks)
 
 ---
 
@@ -144,7 +175,7 @@ Many-to-many relationship between meetings and users.
 
 - **Permissions:** `IsAuthenticated` (all endpoints require login)
 - **Queryset filtering by user role:**
-  - **Admin/Superadmin:** Own created todos `OR` all events
+  - **Admin/Superadmin:** All todos (full visibility across all users)
   - **Other roles:** Assigned to user, attendee of meeting, `OR` all events
 - **Date filtering:**
   - When both `start` and `end` query params provided:
@@ -158,11 +189,11 @@ Many-to-many relationship between meetings and users.
 - **Validation:**
   - Task: deadline required, valid task status values
   - Event: description required, date required, valid event status values, end must be after start
-  - Follow-up: date required
+  - Follow-up: date required, valid follow-up status values (`follow_up`, `failed`, `complete`, `cancelled`)
   - Meeting: date required
   - End time must be after start time (all types)
 - **Read-only fields:** `id`, `user`, `created_at`, `updated_at`
-- **`to_representation`** overrides status at read time for tasks (overdue detection) and events (upcoming/live/ended detection)
+- **`to_representation`** overrides status at read time for tasks (overdue detection), events (upcoming/live/ended detection), and follow-ups (auto-failed when past-due)
 
 ### URLs
 
@@ -205,4 +236,26 @@ CalendarPage (route)
 - Dropdown menus positioned using `getBoundingClientRect` + fixed positioning
 - Color-coded status badges on cards and dropdown options
 - Tabbed interface in AddEventModal (4 types in one modal)
-- Mini PATCH flows for task-specific sub-actions (hold reason, completion remarks, extension requests)
+- Mini PATCH flows for task and follow-up sub-actions (hold reason, extension request, completion remarks, cancellation reason, failed reason)
+- **Assignee-only mini PATCH flows**: Non-creator assignees submit sub-actions as separate PATCH calls; creator sees them read-only
+- **Contact-assignee linkage**: In follow-up creation/editing, contacts load server-side filtered by the assigned user's CRM deals; admin/superadmin users see all contacts
+- **Non-admin creator Assign To restriction**: Non-admin creators cannot change the assignee — it's auto-set to themselves and disabled
+- Debounced server-side search for contact dropdowns (400ms delay)
+
+### Permission Model Reference
+
+**Task (UpdateTaskModal):**
+| Role | Full Edit | Deadline | Status | Hold/Extend/Complete |
+|------|-----------|----------|--------|---------------------|
+| Creator | ✓ | ✓ | ✓ | ✓ (mini PATCH) |
+| Assignee | — | — | ✓ | ✓ (mini PATCH) |
+| Admin (not creator/assignee) | — (read-only) | — | — | — |
+| Others | — (read-only) | — | — | — |
+
+**Follow-up (UpdateFollowUpModal):**
+| Role | Full Edit | Status | Cancel/Fail/Complete Reason |
+|------|-----------|--------|-----------------------------|
+| Creator | ✓ | ✓ | ✓ (read-only view) |
+| Assignee | — | ✓ (not when failed) | ✓ (mini PATCH) |
+| Admin (not creator/assignee) | — (read-only) | — | — |
+| Others | — (read-only with banner) | — | — |
