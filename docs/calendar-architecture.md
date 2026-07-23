@@ -120,10 +120,10 @@ Many-to-many relationship between meetings and users.
 **Statuses:** `follow_up`, `failed`, `complete`, `cancelled`
 
 **Creation (AddEventModal → Follow-up tab):**
-- Required: Title, Follow-Up Date
-- Optional: Notes, Assign To, Contact, Status
+- Required: Title, Pipeline, Assign To, Contact, Follow-Up Date
+- Optional: Notes, Status
 - Status defaults to `follow_up`
-- Contact dropdown disabled until a user is assigned in Assign To
+- Contact dropdown disabled until Pipeline and Assign To are selected
 - Contacts load server-side filtered by CRM deals assigned to the assigned user (`?assigned_user=ID` or `?search=term`)
 - Admin/Superadmin users see all contacts regardless of CRM assignment
 
@@ -137,6 +137,17 @@ Many-to-many relationship between meetings and users.
 - Leaving `complete` → `completion_remarks` cleared
 
 **UI (UpdateFollowUpModal):**
+- **Creator view (canEdit):** Full edit form with all fields. Save button requires title, pipeline, assigned to, contact, and date to be filled.
+- **Poster view (!canEdit):** Non-creators see a read-only poster layout:
+  - Color strip at top (amber=follow_up, red=failed, green=complete, grey=cancelled)
+  - Header with title + status badge
+  - Banner: "Read-only" (red) for others, "You can update the status" (blue) for assignee
+  - Notes section with scrollable description (min 60px, max 200px)
+  - Contact details card: shows name, phone, email, pipeline in a single card (phone/email enriched from CRM pipeline endpoint)
+  - Assigned To and Status as input-style fields with labels outside
+  - Follow-Up Date as full-width card
+  - Reason fields (cancellation, completion, failed) appear directly below Status dropdown when changed
+  - Footer: "Created by" info, Close button, Save button (only if canEditStatus)
 - Permission tiers:
   - `isCreator`: Full edit (title, notes, contact, assign_to, date)
   - `isAssignee`: Can edit status + mini PATCH flows only
@@ -150,6 +161,7 @@ Many-to-many relationship between meetings and users.
   - **Complete**: requires completion remarks (`completion_remarks`)
   - Creator sees these fields as read-only
 - Contact dropdown: loads server-side filtered by assigned user's CRM deals; admin/superadmin users see all contacts
+- Contact details (phone, email) enriched from CRM pipeline endpoint after contacts list loads
 
 **Card (FollowUpCard):**
 - Shows status badge (pink=follow_up, red=failed, green=complete, grey=cancelled)
@@ -248,10 +260,15 @@ CalendarPage (route)
 └── CalendarComponent
     ├── EventsPanel (left sidebar)
     │   ├── AddEventModal (4 tabs: Tasks, Event, Follow-up, Meetings)
-    │   ├── UpdateTaskModal
-    │   ├── UpdateEventModal
-    │   ├── UpdateFollowUpModal
-    │   └── UpdateMeetingModal
+    │   │   ├── TaskTabForm
+    │   │   ├── EventTabForm
+    │   │   ├── FollowUpTabForm
+    │   │   ├── MeetingTabForm
+    │   │   └── FormDropdowns (shared dropdown portals)
+    │   ├── UpdateTaskModal (creator form + assignee poster view)
+    │   ├── UpdateEventModal (creator form + read-only poster view)
+    │   ├── UpdateFollowUpModal (creator form + assignee poster view)
+    │   └── UpdateMeetingModal (creator form + read-only poster view)
     │   └── Card components: TaskCard, EventCard, FollowUpCard, MeetingCard
     └── Month grid (right side)
         ├── Day cells with colored dots
@@ -271,12 +288,18 @@ CalendarPage (route)
 - Modal portals rendered via `createPortal` to `document.body`
 - Dropdown menus positioned using `getBoundingClientRect` + fixed positioning
 - Color-coded status badges on cards and dropdown options
-- Tabbed interface in AddEventModal (4 types in one modal)
+- **AddEventModal split into components:** Each tab (Task, Event, Follow-up, Meeting) is a separate component receiving `data` + `onChange` props; shared dropdown portals in `FormDropdowns` component
+- **Poster views:** Update modals show two layouts based on role:
+  - Creator: full edit form
+  - Non-creator: poster view with read-only info cards, status dropdown (if assignee), and reason fields inline
 - Mini PATCH flows for task and follow-up sub-actions (hold reason, extension request, completion remarks, cancellation reason, failed reason)
 - **Assignee-only mini PATCH flows**: Non-creator assignees submit sub-actions as separate PATCH calls; creator sees them read-only
+- **Reason fields inline:** In creator and poster views, reason fields (cancellation, completion, failed) appear directly below the Status dropdown — not at the bottom of the form
+- **Contact details card:** Poster view shows a single card with contact name, phone, email, and pipeline (enriched from CRM pipeline endpoint)
 - **Contact-assignee linkage**: In follow-up creation/editing, contacts load server-side filtered by the assigned user's CRM deals; admin/superadmin users see all contacts
 - **Non-admin creator Assign To restriction**: Non-admin creators cannot change the assignee — it's auto-set to themselves and disabled
 - Debounced server-side search for contact dropdowns (400ms delay)
+- **Description scroll:** Notes field in poster view has min-height (60px) and max-height (200px) with overflow scroll
 
 ### Permission Model Reference
 
@@ -289,9 +312,47 @@ CalendarPage (route)
 | Others | — (read-only) | — | — | — |
 
 **Follow-up (UpdateFollowUpModal):**
-| Role | Full Edit | Status | Cancel/Fail/Complete Reason |
-|------|-----------|--------|-----------------------------|
-| Creator | ✓ | ✓ | ✓ (read-only view) |
-| Assignee | — | ✓ (not when failed) | ✓ (mini PATCH) |
-| Admin (not creator/assignee) | — (read-only) | — | — |
-| Others | — (read-only with banner) | — | — |
+| Role | View | Full Edit | Status | Cancel/Fail/Complete Reason | Save Requirements |
+|------|------|-----------|--------|-----------------------------|-------------------|
+| Creator | Edit form | ✓ | ✓ | ✓ (inline below status) | title, pipeline, assign_to, contact, date |
+| Assignee | Poster view | — | ✓ (not when failed) | ✓ (mini PATCH, inline below status) | status + reason field |
+| Admin (not creator/assignee) | Poster view (read-only) | — (read-only) | — | — | — |
+| Others | Poster view (read-only with banner) | — (read-only) | — | — | — |
+
+---
+
+## Known Issues / Vulnerabilities
+
+### 1. No External Calendar Sync
+The `calendar_event_id` field on the HR `InterviewSchedule` model is a placeholder — there is no integration code with Google Calendar, Outlook, or iCal anywhere in the codebase. Users must manually duplicate entries between the CRM calendar and their work calendar. There are no mobile notifications for CRM calendar entries.
+
+**Impact:** Double-entry, missed meetings, stale data across systems.
+
+### 2. No API-Level Tests
+Only 17 model-level tests exist (status computation logic in `event_calendar/tests.py`). There are zero tests for:
+- ViewSet permission enforcement (role-based queryset filtering)
+- Serializer validation (missing required fields, invalid status values)
+- Date range filtering (multi-day event overlap queries)
+- Endpoint behavior (can a user PATCH a task they shouldn't have access to?)
+
+**Impact:** Silent regressions — a change to the viewset or serializer could break permission boundaries without detection.
+
+### 3. No Shared API Layer
+All frontend components make raw `axios` calls with hardcoded endpoint strings (e.g., `/api/calendar/todos/`). There is no centralized API client, no request/response typing, no shared error handling, and no retry logic. The endpoint string is duplicated across 8+ files.
+
+**Impact:** Fragile to backend changes (endpoint versioning requires find-and-replace), no TypeScript safety on API shapes, duplicated fetch logic makes bugs harder to track.
+
+### 4. Separate HR Compliance Calendar
+`ComplianceCalendarEntry` in `hr/models.py` is a completely independent model with its own ViewSet, serializer, and migrations. It shares no UI, query logic, or data with the main `CalendarTodo` module.
+
+**Impact:** Feature fragmentation — users must check two separate places for time-sensitive items. No unified calendar view exists.
+
+### 5. Dual-Status (Stored vs Computed)
+`CalendarTodo.status` is a persisted DB field, but `to_representation()` overrides it at read time. For example:
+- A task with `status="assigned"` in the DB gets returned as `"overdue"` via the API if `start < now`
+- The DB and API can disagree on the current status
+- Direct DB queries (admin, reporting, analytics) see stale statuses — e.g., `CalendarTodo.objects.filter(status='overdue')` would miss tasks that became overdue since their last save
+
+The `save()` method also computes and overwrites the status, making the same logic run twice (once at write time, once at read time).
+
+**Impact:** Data inconsistency between what's stored and what's served. Not a UI bug — the UI always shows the correct computed status. Only affects direct DB access for reporting or analytics.
