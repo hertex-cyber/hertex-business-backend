@@ -98,7 +98,7 @@ class ContactLog(Main):
 
     contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name="logs")
     crm = models.ForeignKey(
-        "crm.CRM", on_delete=models.CASCADE, null=True, blank=True, related_name="logs"
+        "crm.CRM", on_delete=models.SET_NULL, null=True, blank=True, related_name="logs"
     )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -109,6 +109,7 @@ class ContactLog(Main):
     )
     activity_type = models.CharField(max_length=100)
     description = models.TextField()
+    pipeline_name = models.CharField(max_length=255, blank=True, null=True)
 
     class Meta:
         ordering = ["-created_at"]

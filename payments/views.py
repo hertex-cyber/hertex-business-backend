@@ -30,5 +30,6 @@ class PaymentViewSet(viewsets.ModelViewSet):
             crm=payment.crm,
             activity_type='Payment Recorded',
             description=description,
-            user=self.request.user
+            user=self.request.user,
+            pipeline_name=payment.crm.pipeline.name if payment.crm and payment.crm.pipeline else None,
         )

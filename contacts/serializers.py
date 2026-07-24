@@ -80,6 +80,7 @@ class ContactLogSerializer(serializers.ModelSerializer):
             "crm",
             "user",
             "user_details",
+            "pipeline_name",
             "activity_type",
             "description",
             "created_at",

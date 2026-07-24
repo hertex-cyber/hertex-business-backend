@@ -405,6 +405,7 @@ class CRMViewSet(viewsets.ModelViewSet):
             activity_type="Pipeline Added",
             description=f"Added to pipeline '{pipeline.name}' under stage '{crm.stage.name if crm.stage else 'Default'}'",
             user=self.request.user,
+            pipeline_name=pipeline.name if pipeline else None,
         )
         if assigned_user:
             ContactLog.objects.create(
@@ -414,6 +415,7 @@ class CRMViewSet(viewsets.ModelViewSet):
                 description=f"Assigned to user {assigned_user.first_name} {assigned_user.last_name}".strip()
                 or assigned_user.email,
                 user=self.request.user,
+                pipeline_name=pipeline.name if pipeline else None,
             )
 
     def perform_update(self, serializer):
@@ -435,6 +437,7 @@ class CRMViewSet(viewsets.ModelViewSet):
                 if instance.stage
                 else "Removed from stage",
                 user=self.request.user,
+                pipeline_name=instance.pipeline.name if instance.pipeline else None,
             )
 
         # Check if assignee changed
@@ -453,7 +456,21 @@ class CRMViewSet(viewsets.ModelViewSet):
                 if instance.assigned_user
                 else "Unassigned",
                 user=self.request.user,
+                pipeline_name=instance.pipeline.name if instance.pipeline else None,
             )
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        from contacts.models import ContactLog
+        ContactLog.objects.create(
+            contact=instance.contact,
+            crm=None,
+            activity_type="Deal Deleted",
+            description=f"Deal removed from pipeline '{instance.pipeline.name}'" if instance.pipeline else "Deal deleted",
+            user=request.user,
+            pipeline_name=instance.pipeline.name if instance.pipeline else None,
+        )
+        return super().destroy(request, *args, **kwargs)
 
     @action(detail=False, methods=["post"], url_path="bulk-add-from-batch")
     def bulk_add_from_batch(self, request):
@@ -461,6 +478,16 @@ class CRMViewSet(viewsets.ModelViewSet):
         pipeline_id = request.data.get("pipeline_id")
         offset = int(request.data.get("offset", 0))
         limit = int(request.data.get("limit", 0))
+
+        # Fetch batch name for activity log descriptions
+        batch_name = None
+        if batch_id:
+            from contacts.models import ImportBatch
+            try:
+                batch = ImportBatch.objects.get(id=batch_id)
+                batch_name = batch.name
+            except ImportBatch.DoesNotExist:
+                pass
 
         if not batch_id or not pipeline_id:
             return Response(
@@ -587,15 +614,29 @@ class CRMViewSet(viewsets.ModelViewSet):
                 saved_crms = CRM.objects.filter(
                     pipeline_id=pipeline_id, contact_id__in=new_chunk_ids
                 )
+
+                # Deduplicate: skip contacts that already have a "Pipeline Added" log for this deal
+                existing_log_contacts = set(
+                    ContactLog.objects.filter(
+                        crm__in=saved_crms, activity_type="Pipeline Added"
+                    ).values_list("crm_id", flat=True)
+                )
+
                 log_entries = []
                 for crm in saved_crms:
+                    if crm.id in existing_log_contacts:
+                        continue
+                    description = f"Added to pipeline '{pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}'"
+                    if batch_name:
+                        description += f" — Imported from '{batch_name}'"
                     log_entries.append(
                         ContactLog(
                             contact=crm.contact,
                             crm=crm,
                             activity_type="Pipeline Added",
-                            description=f"Added to pipeline '{pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}'",
+                            description=description,
                             user=request.user,
+                            pipeline_name=pipeline.name,
                         )
                     )
                     if crm.assigned_user:
@@ -607,6 +648,7 @@ class CRMViewSet(viewsets.ModelViewSet):
                                 description=f"Assigned to user {crm.assigned_user.first_name} {crm.assigned_user.last_name}".strip()
                                 or crm.assigned_user.email,
                                 user=request.user,
+                                pipeline_name=pipeline.name,
                             )
                         )
                 ContactLog.objects.bulk_create(log_entries, batch_size=1000)
@@ -685,6 +727,7 @@ class CRMViewSet(viewsets.ModelViewSet):
                             activity_type="Pipeline Changed",
                             description=f"Moved to retarget pipeline '{pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}'",
                             user=request.user,
+                            pipeline_name=pipeline.name,
                         )
                     )
                 ContactLog.objects.bulk_create(log_entries, batch_size=1000)
@@ -799,15 +842,26 @@ class CRMViewSet(viewsets.ModelViewSet):
                 saved_crms = CRM.objects.filter(
                     pipeline_id=pipeline_id, contact_id__in=new_contact_ids
                 ).select_related("contact", "assigned_user")
+
+                # Deduplicate: skip contacts that already have a "Pipeline Added" log for this deal
+                existing_log_contacts = set(
+                    ContactLog.objects.filter(
+                        crm__in=saved_crms, activity_type="Pipeline Added"
+                    ).values_list("crm_id", flat=True)
+                )
+
                 log_entries = []
                 for crm in saved_crms:
+                    if crm.id in existing_log_contacts:
+                        continue
                     log_entries.append(
                         ContactLog(
                             contact=crm.contact,
                             crm=crm,
                             activity_type="Pipeline Added",
-                            description=f"Added to pipeline '{pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}' (Retargeting/Bulk)",
+                            description=f"Added to pipeline '{pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}'",
                             user=request.user,
+                            pipeline_name=pipeline.name,
                         )
                     )
                     if crm.assigned_user:
@@ -819,6 +873,7 @@ class CRMViewSet(viewsets.ModelViewSet):
                                 description=f"Assigned to user {crm.assigned_user.first_name} {crm.assigned_user.last_name}".strip()
                                 or crm.assigned_user.email,
                                 user=request.user,
+                                pipeline_name=pipeline.name,
                             )
                         )
                 print(

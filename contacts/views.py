@@ -155,18 +155,19 @@ class ContactViewSet(viewsets.ModelViewSet):
             batch.contact_count += len(contact_objects)
             batch.save()
 
-            # Bulk create import activity logs
-            saved_contacts = Contact.objects.filter(import_batch=batch)
+            # Bulk create import activity logs (only for contacts created in this call)
             log_objects = [
                 ContactLog(
                     contact=c,
                     activity_type="Imported",
                     description=f"Contact imported from batch '{batch.name}'",
                     user=request.user,
+                    pipeline_name=None,
                 )
-                for c in saved_contacts
+                for c in contact_objects
             ]
-            ContactLog.objects.bulk_create(log_objects, batch_size=1000)
+            if log_objects:
+                ContactLog.objects.bulk_create(log_objects, batch_size=1000)
 
             return Response(
                 {
@@ -188,7 +189,7 @@ class ContactViewSet(viewsets.ModelViewSet):
 
 
 class ContactLogViewSet(viewsets.ModelViewSet):
-    queryset = ContactLog.objects.all().select_related("contact", "crm", "user")
+    queryset = ContactLog.objects.all().select_related("contact", "crm", "crm__pipeline", "user")
     serializer_class = ContactLogSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -248,6 +249,7 @@ class ContactRemarkViewSet(viewsets.ModelViewSet):
             user=remark.user,
             activity_type="Remark Added",
             description=f'Added an update: "{remark.text}"',
+            pipeline_name=remark.crm.pipeline.name if remark.crm and remark.crm.pipeline else None,
         )
 
 
