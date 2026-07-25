@@ -8,6 +8,10 @@ django-cors-headers>=4.9.0
 django-filter>=25.2
 django-otp>=1.4.0
 
+# WebSockets
+channels>=4.2.0
+channels-redis>=4.2.0
+
 # Database & Infrastructure
 psycopg[binary]
 dj-database-url>=2.3.0

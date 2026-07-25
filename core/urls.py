@@ -23,4 +23,5 @@ urlpatterns = [
     path("api/", include("media.urls")),
     path("api/inventory/", include("inventory.urls")),
     path("api/calendar/", include("event_calendar.urls")),
+    path("api/work/", include("project_management.urls")),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

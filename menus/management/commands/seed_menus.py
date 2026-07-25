@@ -145,6 +145,15 @@ DEFAULT_MENUS = [
         "description": "Invoice creation and management",
     },
     {
+        "code": "work",
+        "name": "HertexFlow Work",
+        "href": "/work",
+        "icon": "Kanban",
+        "section": "Operations",
+        "order": 11,
+        "description": "Unified project, task, and work management",
+    },
+    {
         "code": "settings_pref",
         "name": "Preferences",
         "href": "/settings",
