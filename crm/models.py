@@ -107,7 +107,7 @@ class CRM(Main):
     notes = models.TextField(blank=True)
 
     class Meta:
-        ordering = ["-created_at"]
+        ordering = ["-updated_at"]
         verbose_name = "CRM Entry"
         verbose_name_plural = "CRM Entries"
         indexes = [

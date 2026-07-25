@@ -19,7 +19,7 @@ class CalendarTodoViewSet(viewsets.ModelViewSet):
             )
 
         qs = (
-            qs.select_related("assigned_to", "contact", "pipeline")
+            qs.select_related("assigned_to", "contact", "pipeline", "user")
             .prefetch_related("attendees__user")
             .distinct()
         )
@@ -46,7 +46,7 @@ class CalendarTodoViewSet(viewsets.ModelViewSet):
             if end:
                 qs = qs.filter(start__lte=end)
 
-        return qs
+        return qs.order_by("-updated_at")
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)

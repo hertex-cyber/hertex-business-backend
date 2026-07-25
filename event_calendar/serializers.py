@@ -25,6 +25,8 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
     )
     assigned_to_name = serializers.SerializerMethodField()
     contact_name = serializers.SerializerMethodField()
+    contact_phone = serializers.SerializerMethodField()
+    contact_email = serializers.SerializerMethodField()
     pipeline_name = serializers.SerializerMethodField()
     user_name = serializers.SerializerMethodField()
 
@@ -54,6 +56,8 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             "attendee_ids",
             "assigned_to_name",
             "contact_name",
+            "contact_phone",
+            "contact_email",
             "user_name",
             "created_at",
             "updated_at",
@@ -72,6 +76,16 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
         if not obj.contact:
             return None
         return obj.contact.name or obj.contact.email
+
+    def get_contact_phone(self, obj):
+        if not obj.contact:
+            return None
+        return obj.contact.phone
+
+    def get_contact_email(self, obj):
+        if not obj.contact:
+            return None
+        return obj.contact.email
 
     def get_pipeline_name(self, obj):
         if not obj.pipeline:

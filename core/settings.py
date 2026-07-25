@@ -226,8 +226,12 @@ EMPLOYEE_ID_FORMAT = os.getenv("EMPLOYEE_ID_FORMAT", "EMP-{year}-{seq:04d}")
 # JWT Configuration
 from datetime import timedelta
 
-ACCESS_TOKEN_LIFETIME = timedelta(minutes=int(os.getenv("ACCESS_TOKEN_LIFETIME_MINUTES", "1440")))
-REFRESH_TOKEN_LIFETIME = timedelta(days=int(os.getenv("REFRESH_TOKEN_LIFETIME_DAYS", "30")))
+ACCESS_TOKEN_LIFETIME = timedelta(
+    minutes=int(os.getenv("ACCESS_TOKEN_LIFETIME_MINUTES", "1440"))
+)
+REFRESH_TOKEN_LIFETIME = timedelta(
+    days=int(os.getenv("REFRESH_TOKEN_LIFETIME_DAYS", "30"))
+)
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": ACCESS_TOKEN_LIFETIME,
@@ -286,17 +290,4 @@ DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "noreply@bytehive.com")
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
-    "handlers": {
-        "console": {
-            "level": "DEBUG",
-            "class": "logging.StreamHandler",
-        },
-    },
-    "loggers": {
-        "django.db.backends": {
-            "level": "DEBUG",
-            "handlers": ["console"],
-            "propagate": False,
-        },
-    },
 }

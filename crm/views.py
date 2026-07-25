@@ -422,6 +422,7 @@ class CRMViewSet(viewsets.ModelViewSet):
         old_instance = self.get_object()
         old_stage = old_instance.stage
         old_user = old_instance.assigned_user
+        old_pipeline = old_instance.pipeline
 
         instance = serializer.save()
 
@@ -439,6 +440,31 @@ class CRMViewSet(viewsets.ModelViewSet):
                 user=self.request.user,
                 pipeline_name=instance.pipeline.name if instance.pipeline else None,
             )
+
+        # Check if pipeline changed
+        if old_pipeline != instance.pipeline:
+            ContactLog.objects.create(
+                contact=instance.contact,
+                crm=instance,
+                activity_type="Pipeline Changed",
+                description=f"Added to pipeline '{instance.pipeline.name}'"
+                if instance.pipeline
+                else "Removed from pipeline",
+                user=self.request.user,
+                pipeline_name=instance.pipeline.name if instance.pipeline else None,
+            )
+            # Log on the source deal that it was moved from old pipeline
+            if old_pipeline:
+                ContactLog.objects.create(
+                    contact=instance.contact,
+                    crm=instance,
+                    activity_type="Pipeline Changed",
+                    description=f"Moved from pipeline '{old_pipeline.name}' to '{instance.pipeline.name}'"
+                    if instance.pipeline
+                    else f"Moved from pipeline '{old_pipeline.name}'",
+                    user=self.request.user,
+                    pipeline_name=old_pipeline.name,
+                )
 
         # Check if assignee changed
         if old_user != instance.assigned_user:
@@ -471,6 +497,77 @@ class CRMViewSet(viewsets.ModelViewSet):
             pipeline_name=instance.pipeline.name if instance.pipeline else None,
         )
         return super().destroy(request, *args, **kwargs)
+
+    @action(detail=True, methods=["post"], url_path="copy-to-pipeline")
+    def copy_to_pipeline(self, request, pk=None):
+        """Copy a deal to a new pipeline (creates new CRM entry, logs on source deal)."""
+        source = self.get_object()
+        target_pipeline_id = request.data.get("pipeline_id")
+        if not target_pipeline_id:
+            return Response({"error": "pipeline_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        from crm.models import Pipeline, Stage
+        from contacts.models import ContactLog
+
+        try:
+            target_pipeline = Pipeline.objects.get(id=target_pipeline_id)
+        except Pipeline.DoesNotExist:
+            return Response({"error": "Target pipeline not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        first_stage = Stage.objects.filter(pipeline=target_pipeline).order_by("order").first()
+
+        # Auto-assign based on pipeline assignment type
+        assigned_user = request.data.get("assigned_user") or source.assigned_user
+        if not assigned_user:
+            if target_pipeline.assignment_type == "round_robin":
+                assigned_user = self.assign_round_robin(target_pipeline)
+            elif target_pipeline.assignment_type == "least_loaded":
+                assigned_user = self.assign_least_loaded(target_pipeline)
+
+        # Create new CRM entry
+        new_crm = CRM.objects.create(
+            contact=source.contact,
+            pipeline=target_pipeline,
+            stage=first_stage,
+            value=source.value,
+            priority=source.priority,
+            assigned_user=assigned_user,
+        )
+
+        # Log on source deal
+        ContactLog.objects.create(
+            contact=source.contact,
+            crm=source,
+            activity_type="Pipeline Changed",
+            description=f"Copied to pipeline '{target_pipeline.name}'",
+            user=request.user,
+            pipeline_name=source.pipeline.name if source.pipeline else None,
+        )
+
+        # Log on new deal (already done by perform_create? No, we're creating directly)
+        ContactLog.objects.create(
+            contact=new_crm.contact,
+            crm=new_crm,
+            activity_type="Pipeline Added",
+            description=f"Added to pipeline '{target_pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}' — Copied from '{source.pipeline.name}'" if source.pipeline else f"Added to pipeline '{target_pipeline.name}'",
+            user=request.user,
+            pipeline_name=target_pipeline.name,
+        )
+
+        # Auto-assignment log
+        if new_crm.assigned_user:
+            ContactLog.objects.create(
+                contact=new_crm.contact,
+                crm=new_crm,
+                activity_type="Assignment Changed",
+                description=f"Assigned to user {new_crm.assigned_user.first_name} {new_crm.assigned_user.last_name}".strip()
+                or new_crm.assigned_user.email,
+                user=request.user,
+                pipeline_name=target_pipeline.name,
+            )
+
+        serializer = CRMSerializer(new_crm)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["post"], url_path="bulk-add-from-batch")
     def bulk_add_from_batch(self, request):
