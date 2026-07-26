@@ -19,7 +19,11 @@ DEFAULT_STAGES = [
 
 
 class PipelineViewSet(viewsets.ModelViewSet):
-    queryset = Pipeline.objects.prefetch_related("stages", "departments").all()
+    queryset = (
+        Pipeline.objects.annotate(deals_count=Count("deals"))
+        .prefetch_related("stages", "departments")
+        .all()
+    )
     serializer_class = PipelineSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [filters.SearchFilter]
@@ -1017,3 +1021,105 @@ class CRMViewSet(viewsets.ModelViewSet):
             return Response(
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @action(detail=False, methods=["post"], url_path="bulk-move-deals")
+    def bulk_move_deals(self, request):
+        """Bulk move deal cards (CRM entries) to a target pipeline and stage."""
+        deal_ids = request.data.get("deal_ids", [])
+        pipeline_id = request.data.get("pipeline_id")
+        stage_id = request.data.get("stage_id")
+
+        if not pipeline_id or not deal_ids:
+            return Response(
+                {"error": "pipeline_id and deal_ids list are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            pipeline = Pipeline.objects.get(id=pipeline_id)
+            if (
+                request.user.role == "Staff"
+                and not pipeline.departments.filter(
+                    id__in=request.user.departments.all()
+                ).exists()
+            ):
+                return Response(
+                    {"error": "You do not have access to this pipeline."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # Determine target stage
+            target_stage = None
+            if stage_id:
+                target_stage = Stage.objects.filter(id=stage_id, pipeline=pipeline).first()
+            if not target_stage:
+                target_stage = Stage.objects.filter(pipeline=pipeline).order_by("order").first()
+
+            # Pre-fetch CRM records with existing contacts & pipeline names for activity logging
+            deals_to_move = list(
+                CRM.objects.filter(id__in=deal_ids).select_related("contact", "pipeline")
+            )
+
+            if not deals_to_move:
+                return Response(
+                    {"message": "No valid deals found to move.", "moved_count": 0}
+                )
+
+            # Perform bulk update
+            moved_count = CRM.objects.filter(id__in=deal_ids).update(
+                pipeline=pipeline,
+                stage=target_stage,
+            )
+
+            # Create ContactLog entries in bulk (both target pipeline & source pipeline)
+            from contacts.models import ContactLog
+
+            log_entries = []
+            for crm in deals_to_move:
+                old_pipeline_name = crm.pipeline.name if crm.pipeline else None
+                new_pipeline_name = pipeline.name
+                stage_name = target_stage.name if target_stage else "Default"
+
+                # Log for target pipeline
+                log_entries.append(
+                    ContactLog(
+                        contact=crm.contact,
+                        crm=crm,
+                        activity_type="Pipeline Changed",
+                        description=f"Moved to pipeline '{new_pipeline_name}' under stage '{stage_name}'",
+                        user=request.user,
+                        pipeline_name=new_pipeline_name,
+                    )
+                )
+
+                # Log for source pipeline if different
+                if old_pipeline_name and old_pipeline_name != new_pipeline_name:
+                    log_entries.append(
+                        ContactLog(
+                            contact=crm.contact,
+                            crm=crm,
+                            activity_type="Pipeline Changed",
+                            description=f"Moved from pipeline '{old_pipeline_name}' to '{new_pipeline_name}' under stage '{stage_name}'",
+                            user=request.user,
+                            pipeline_name=old_pipeline_name,
+                        )
+                    )
+
+            ContactLog.objects.bulk_create(log_entries, batch_size=1000)
+
+            return Response(
+                {
+                    "message": f"Successfully moved {moved_count} deals.",
+                    "moved_count": moved_count,
+                }
+            )
+        except Pipeline.DoesNotExist:
+            return Response(
+                {"error": "Target pipeline not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
