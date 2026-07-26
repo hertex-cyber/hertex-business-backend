@@ -12,14 +12,14 @@ class CalendarTodoViewSet(viewsets.ModelViewSet):
         user = self.request.user
 
         if user.role in ("Superadmin", "Admin"):
-            qs = CalendarTodo.objects.filter(user=user)
+            qs = CalendarTodo.objects.all()
         else:
             qs = CalendarTodo.objects.filter(
-                Q(assigned_to=user) | Q(attendees__user=user)
+                Q(assigned_to=user) | Q(attendees__user=user) | Q(todo_type="event")
             )
 
         qs = (
-            qs.select_related("assigned_to", "contact")
+            qs.select_related("assigned_to", "contact", "pipeline", "user")
             .prefetch_related("attendees__user")
             .distinct()
         )
@@ -28,17 +28,25 @@ class CalendarTodoViewSet(viewsets.ModelViewSet):
         if todo_type:
             qs = qs.filter(todo_type=todo_type)
 
+        pipeline = self.request.query_params.get("pipeline")
+        if pipeline:
+            qs = qs.filter(pipeline_id=pipeline)
+
         start = self.request.query_params.get("start")
         end = self.request.query_params.get("end")
         if start and end:
-            qs = qs.filter(start__gte=start, start__lte=end)
+            base_q = Q(start__gte=start, start__lte=end)
+            event_span_q = Q(
+                todo_type="event", start__lt=end, end__isnull=False, end__gte=start
+            )
+            qs = qs.filter(base_q | event_span_q)
         else:
             if start:
                 qs = qs.filter(start__gte=start)
             if end:
                 qs = qs.filter(start__lte=end)
 
-        return qs
+        return qs.order_by("-updated_at")
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)

@@ -25,6 +25,9 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
     )
     assigned_to_name = serializers.SerializerMethodField()
     contact_name = serializers.SerializerMethodField()
+    contact_phone = serializers.SerializerMethodField()
+    contact_email = serializers.SerializerMethodField()
+    pipeline_name = serializers.SerializerMethodField()
     user_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -39,16 +42,22 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             "start",
             "end",
             "contact",
+            "pipeline",
+            "pipeline_name",
             "location",
             "status",
             "hold_reason",
             "extension_request",
             "completion_remarks",
+            "followup_cancellation",
+            "followup_failed",
             "assigned_to",
             "attendees",
             "attendee_ids",
             "assigned_to_name",
             "contact_name",
+            "contact_phone",
+            "contact_email",
             "user_name",
             "created_at",
             "updated_at",
@@ -68,6 +77,21 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             return None
         return obj.contact.name or obj.contact.email
 
+    def get_contact_phone(self, obj):
+        if not obj.contact:
+            return None
+        return obj.contact.phone
+
+    def get_contact_email(self, obj):
+        if not obj.contact:
+            return None
+        return obj.contact.email
+
+    def get_pipeline_name(self, obj):
+        if not obj.pipeline:
+            return None
+        return obj.pipeline.name
+
     def get_user_name(self, obj):
         user = obj.user
         if user.first_name:
@@ -85,15 +109,8 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                     {"start": "Deadline is required for tasks."}
                 )
             status = data.get("status")
-            if status and status not in (
-                "assigned",
-                "progress",
-                "completed",
-                "canceled",
-                "on_hold",
-                "overdue",
-                "approved",
-            ):
+            valid_statuses = [s[0] for s in CalendarTodo.TASK_STATUS_CHOICES]
+            if status and status not in valid_statuses:
                 raise serializers.ValidationError(
                     {"status": f"Invalid status '{status}' for tasks."}
                 )
@@ -107,17 +124,35 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"start": "Date is required for events."}
                 )
+            status = data.get("status")
+            valid_statuses = [s[0] for s in CalendarTodo.EVENT_STATUS_CHOICES]
+            if status and status not in valid_statuses:
+                raise serializers.ValidationError(
+                    {"status": f"Invalid status '{status}' for events."}
+                )
 
         elif todo_type == "followup":
             if start_missing or (self.instance is None and not data.get("start")):
                 raise serializers.ValidationError(
                     {"start": "Follow-up date is required."}
                 )
+            status = data.get("status")
+            valid_statuses = [s[0] for s in CalendarTodo.FOLLOWUP_STATUS_CHOICES]
+            if status and status not in valid_statuses:
+                raise serializers.ValidationError(
+                    {"status": f"Invalid status '{status}' for follow-ups."}
+                )
 
         elif todo_type == "meeting":
             if start_missing or (self.instance is None and not data.get("start")):
                 raise serializers.ValidationError(
                     {"start": "Date & time is required for meetings."}
+                )
+            status = data.get("status")
+            valid_statuses = [s[0] for s in CalendarTodo.MEETING_STATUS_CHOICES]
+            if status and status not in valid_statuses:
+                raise serializers.ValidationError(
+                    {"status": f"Invalid status '{status}' for meetings."}
                 )
 
         if data.get("start") and data.get("end") and data["start"] >= data["end"]:
@@ -129,6 +164,7 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
+
         if (
             instance.todo_type == "task"
             and instance.start
@@ -136,6 +172,16 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
         ):
             if instance.start < timezone.now():
                 data["status"] = "overdue"
+
+        if instance.todo_type == "followup" and instance.start:
+            if instance.start < timezone.now() and instance.status == "follow_up":
+                data["status"] = "failed"
+
+        if instance.todo_type in ("event", "meeting"):
+            data["status"] = CalendarTodo.compute_event_status(
+                instance.start, instance.end, instance.status
+            )
+
         return data
 
     def create(self, validated_data):
@@ -159,6 +205,10 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             validated_data["extension_request"] = None
         if instance.status == "completed" and new_status and new_status != "completed":
             validated_data["completion_remarks"] = None
+        if instance.status == "cancelled" and new_status and new_status != "cancelled":
+            validated_data["followup_cancellation"] = None
+        if instance.status == "failed" and new_status and new_status != "failed":
+            validated_data["followup_failed"] = None
         if instance.extension_request and start:
             validated_data["extension_request"] = None
 

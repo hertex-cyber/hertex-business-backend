@@ -12,6 +12,37 @@ class CalendarTodo(models.Model):
         ("meeting", "Meeting"),
     ]
 
+    FOLLOWUP_STATUS_CHOICES = [
+        ("follow_up", "Follow Up"),
+        ("failed", "Failed"),
+        ("complete", "Complete"),
+        ("cancelled", "Cancelled"),
+    ]
+
+    MEETING_STATUS_CHOICES = [
+        ("upcoming", "Upcoming"),
+        ("live", "Live"),
+        ("ended", "Ended"),
+        ("cancelled", "Cancelled"),
+    ]
+
+    EVENT_STATUS_CHOICES = [
+        ("upcoming", "Upcoming"),
+        ("live", "Live"),
+        ("ended", "Ended"),
+        ("cancelled", "Cancelled"),
+    ]
+
+    TASK_STATUS_CHOICES = [
+        ("assigned", "Assigned"),
+        ("progress", "Progress"),
+        ("completed", "Completed"),
+        ("canceled", "Canceled"),
+        ("on_hold", "On Hold"),
+        ("overdue", "Overdue"),
+        ("approved", "Approved"),
+    ]
+
     PRIORITY_CHOICES = [
         ("low", "Low"),
         ("medium", "Medium"),
@@ -47,8 +78,18 @@ class CalendarTodo(models.Model):
     hold_reason = models.TextField(blank=True, null=True)
     extension_request = models.TextField(blank=True, null=True)
     completion_remarks = models.TextField(blank=True, null=True)
+    followup_cancellation = models.TextField(blank=True, null=True)
+    followup_failed = models.TextField(blank=True, null=True)
 
     location = models.CharField(max_length=255, blank=True, null=True)
+
+    pipeline = models.ForeignKey(
+        "crm.Pipeline",
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="followups",
+    )
 
     assigned_to = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -65,6 +106,24 @@ class CalendarTodo(models.Model):
         db_table = "event_calendar_todos"
         ordering = ["-created_at"]
 
+    @staticmethod
+    def compute_event_status(start, end, status):
+        if start and status not in ("cancelled",):
+            now = timezone.now()
+            if end:
+                if end < now:
+                    return "ended"
+                elif start <= now <= end and status != "ended":
+                    return "live"
+                elif start > now:
+                    return "upcoming"
+            else:
+                if start < now and status != "ended":
+                    return "ended"
+                else:
+                    return "upcoming"
+        return status
+
     def save(self, *args, **kwargs):
         if self.todo_type == "task" and self.start:
             if self.start < timezone.now() and self.status not in (
@@ -76,6 +135,14 @@ class CalendarTodo(models.Model):
                 self.status = "overdue"
             elif self.status == "overdue" and self.start > timezone.now():
                 self.status = "assigned"
+
+        if self.todo_type == "followup" and self.start:
+            if self.start < timezone.now() and self.status == "follow_up":
+                self.status = "failed"
+
+        if self.todo_type in ("event", "meeting"):
+            self.status = self.compute_event_status(self.start, self.end, self.status)
+
         super().save(*args, **kwargs)
 
     def __str__(self):

@@ -29,6 +29,7 @@ class StageSerializer(serializers.ModelSerializer):
 class PipelineSerializer(serializers.ModelSerializer):
     stages = StageSerializer(many=True, read_only=True)
     departments = DepartmentSerializer(many=True, read_only=True)
+    deals_count = serializers.SerializerMethodField()
     department_ids = serializers.PrimaryKeyRelatedField(
         queryset=Department.objects.all(),
         source="departments",
@@ -36,6 +37,11 @@ class PipelineSerializer(serializers.ModelSerializer):
         required=False,
         write_only=True,
     )
+
+    def get_deals_count(self, obj):
+        if hasattr(obj, "deals_count"):
+            return obj.deals_count
+        return obj.deals.count()
 
     class Meta:
         model = Pipeline
@@ -46,6 +52,7 @@ class PipelineSerializer(serializers.ModelSerializer):
             "stages",
             "departments",
             "department_ids",
+            "deals_count",
             "assignment_type",
             "pipeline_type",
             "mandatory_fields",
