@@ -430,6 +430,11 @@ class CRMViewSet(viewsets.ModelViewSet):
 
         instance = serializer.save()
 
+        # Reset assigned_user when pipeline changes (moving deals between pipelines)
+        if old_pipeline and old_pipeline != instance.pipeline:
+            CRM.objects.filter(id=instance.id).update(assigned_user=None)
+            instance.assigned_user = None
+
         # Check if stage changed
         from contacts.models import ContactLog
 
@@ -520,13 +525,14 @@ class CRMViewSet(viewsets.ModelViewSet):
 
         first_stage = Stage.objects.filter(pipeline=target_pipeline).order_by("order").first()
 
-        # Auto-assign based on pipeline assignment type
-        assigned_user = request.data.get("assigned_user") or source.assigned_user
-        if not assigned_user:
-            if target_pipeline.assignment_type == "round_robin":
-                assigned_user = self.assign_round_robin(target_pipeline)
-            elif target_pipeline.assignment_type == "least_loaded":
-                assigned_user = self.assign_least_loaded(target_pipeline)
+        # Don't inherit assigned_user from source — the target pipeline
+        # has different user groups. Auto-assignment will handle it if
+        # the pipeline has a strategy configured, otherwise leave null.
+        assigned_user = None
+        if target_pipeline.assignment_type == "round_robin":
+            assigned_user = self.assign_round_robin(target_pipeline)
+        elif target_pipeline.assignment_type == "least_loaded":
+            assigned_user = self.assign_least_loaded(target_pipeline)
 
         # Create new CRM entry
         new_crm = CRM.objects.create(
@@ -548,7 +554,7 @@ class CRMViewSet(viewsets.ModelViewSet):
             pipeline_name=source.pipeline.name if source.pipeline else None,
         )
 
-        # Log on new deal (already done by perform_create? No, we're creating directly)
+        # Log on new deal
         ContactLog.objects.create(
             contact=new_crm.contact,
             crm=new_crm,
@@ -572,6 +578,186 @@ class CRMViewSet(viewsets.ModelViewSet):
 
         serializer = CRMSerializer(new_crm)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["post"], url_path="bulk-add-to-pipeline")
+    def bulk_add_to_pipeline(self, request):
+        """
+        Copy multiple deals to a target pipeline (creates NEW CRM entries).
+        Unlike move which updates pipeline_id on existing rows, this creates
+        fresh CRM entries — useful when a contact purchases multiple services.
+        """
+        deal_ids = request.data.get("deal_ids", [])
+        pipeline_id = request.data.get("pipeline_id")
+
+        if not pipeline_id or not deal_ids:
+            return Response(
+                {"error": "pipeline_id and deal_ids list are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            from contacts.models import ContactLog
+
+            target_pipeline = Pipeline.objects.get(id=pipeline_id)
+            if (
+                request.user.role == "Staff"
+                and not target_pipeline.departments.filter(
+                    id__in=request.user.departments.all()
+                ).exists()
+            ):
+                return Response(
+                    {"error": "You do not have access to this pipeline."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            first_stage = Stage.objects.filter(pipeline=target_pipeline).order_by("order").first()
+
+            # Pre-fetch source deals with their contacts
+            source_deals = list(
+                CRM.objects.filter(id__in=deal_ids).select_related("contact", "pipeline")
+            )
+
+            if not source_deals:
+                return Response(
+                    {"message": "No valid deals found to copy.", "added_count": 0}
+                )
+
+            # Pre-calculate assignment for all new entries
+            eligible_users = list(
+                User.objects.filter(
+                    departments__in=target_pipeline.departments.all(), is_active=True
+                ).distinct()
+            )
+
+            rr_index = 0
+            if target_pipeline.assignment_type == "round_robin" and eligible_users:
+                last_deal = (
+                    CRM.objects.filter(
+                        pipeline=target_pipeline, assigned_user__isnull=False
+                    )
+                    .order_by("-created_at")
+                    .first()
+                )
+                if last_deal and last_deal.assigned_user in eligible_users:
+                    rr_index = (
+                        eligible_users.index(last_deal.assigned_user) + 1
+                    ) % len(eligible_users)
+
+            ll_loads = {}
+            if target_pipeline.assignment_type == "least_loaded" and eligible_users:
+                ll_loads = {user: 0 for user in eligible_users}
+                counts = (
+                    CRM.objects.filter(
+                        pipeline=target_pipeline, assigned_user__in=eligible_users
+                    )
+                    .values("assigned_user")
+                    .annotate(c=Count("id"))
+                )
+                for item in counts:
+                    user_obj = next(
+                        (u for u in eligible_users if u.id == item["assigned_user"]), None
+                    )
+                    if user_obj:
+                        ll_loads[user_obj] = item["c"]
+
+            # Build new CRM entries
+            crm_entries = []
+            for deal in source_deals:
+                assigned_user = None
+                if eligible_users:
+                    if target_pipeline.assignment_type == "round_robin":
+                        assigned_user = eligible_users[rr_index]
+                        rr_index = (rr_index + 1) % len(eligible_users)
+                    elif target_pipeline.assignment_type == "least_loaded":
+                        assigned_user = min(ll_loads, key=ll_loads.get)
+                        ll_loads[assigned_user] += 1
+
+                crm_entries.append(
+                    CRM(
+                        contact=deal.contact,
+                        pipeline=target_pipeline,
+                        stage=first_stage,
+                        value=deal.value,
+                        priority=deal.priority,
+                        assigned_user=assigned_user,
+                    )
+                )
+
+            # Bulk create in chunks
+            CRM.objects.bulk_create(crm_entries, batch_size=1000)
+
+            # Fetch back saved entries for activity logs
+            new_contact_ids = [c.contact_id for c in crm_entries]
+            saved_crms = CRM.objects.filter(
+                pipeline=target_pipeline, contact_id__in=new_contact_ids
+            ).select_related("contact", "assigned_user")
+
+            # Build activity logs
+            log_entries = []
+            for crm_entry in saved_crms:
+                # Find matching source deal for better descriptions
+                source_deal = next(
+                    (d for d in source_deals if d.contact_id == crm_entry.contact_id), None
+                )
+                source_pipeline_name = source_deal.pipeline.name if source_deal and source_deal.pipeline else None
+
+                description = f"Added to pipeline '{target_pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}'"
+                if source_pipeline_name:
+                    description += f" — Copied from '{source_pipeline_name}'"
+
+                log_entries.append(
+                    ContactLog(
+                        contact=crm_entry.contact,
+                        crm=crm_entry,
+                        activity_type="Pipeline Added",
+                        description=description,
+                        user=request.user,
+                        pipeline_name=target_pipeline.name,
+                    )
+                )
+                if crm_entry.assigned_user:
+                    log_entries.append(
+                        ContactLog(
+                            contact=crm_entry.contact,
+                            crm=crm_entry,
+                            activity_type="Assignment Changed",
+                            description=f"Assigned to user {crm_entry.assigned_user.first_name} {crm_entry.assigned_user.last_name}".strip()
+                            or crm_entry.assigned_user.email,
+                            user=request.user,
+                            pipeline_name=target_pipeline.name,
+                        )
+                    )
+
+                # Also log on source deal
+                if source_deal:
+                    log_entries.append(
+                        ContactLog(
+                            contact=source_deal.contact,
+                            crm=source_deal,
+                            activity_type="Pipeline Changed",
+                            description=f"Copied to pipeline '{target_pipeline.name}'",
+                            user=request.user,
+                            pipeline_name=source_deal.pipeline.name if source_deal.pipeline else None,
+                        )
+                    )
+
+            ContactLog.objects.bulk_create(log_entries, batch_size=1000)
+
+            return Response(
+                {
+                    "message": f"Successfully added {len(crm_entries)} deals to the pipeline.",
+                    "added_count": len(crm_entries),
+                }
+            )
+        except Pipeline.DoesNotExist:
+            return Response(
+                {"error": "Target pipeline not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=False, methods=["post"], url_path="bulk-add-from-batch")
     def bulk_add_from_batch(self, request):
@@ -806,9 +992,12 @@ class CRMViewSet(viewsets.ModelViewSet):
 
             if source_pipeline:
                 # MOVE existing deals from source pipeline to new pipeline
+                # Reset assigned_user since the target pipeline may have different
+                # user groups. Trigger-assignment (called by the frontend after
+                # the move) can then assign them properly.
                 moved_count = CRM.objects.filter(
                     pipeline_id=source_pipeline, contact_id__in=contact_ids
-                ).update(pipeline_id=pipeline_id, stage=first_stage, priority="High")
+                ).update(pipeline_id=pipeline_id, stage=first_stage, priority="High", assigned_user=None)
 
                 # Update contact statuses to Retarget
                 Contact.objects.filter(id__in=contact_ids).update(status="Retarget")
@@ -1022,6 +1211,60 @@ class CRMViewSet(viewsets.ModelViewSet):
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    @action(detail=False, methods=["post"], url_path="bulk-delete-deals")
+    def bulk_delete_deals(self, request):
+        """Bulk delete CRM entries by IDs."""
+        deal_ids = request.data.get("deal_ids", [])
+
+        if not deal_ids:
+            return Response(
+                {"error": "deal_ids list is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            from contacts.models import ContactLog
+
+            # Pre-fetch deals with contacts and pipelines for activity logging
+            deals_to_delete = list(
+                CRM.objects.filter(id__in=deal_ids).select_related("contact", "pipeline")
+            )
+
+            if not deals_to_delete:
+                return Response(
+                    {"message": "No valid deals found to delete.", "deleted_count": 0}
+                )
+
+            # Create activity logs before deletion
+            log_entries = []
+            for crm in deals_to_delete:
+                log_entries.append(
+                    ContactLog(
+                        contact=crm.contact,
+                        crm=None,
+                        activity_type="Deal Deleted",
+                        description=f"Deal removed from pipeline '{crm.pipeline.name}'" if crm.pipeline else "Deal deleted",
+                        user=request.user,
+                        pipeline_name=crm.pipeline.name if crm.pipeline else None,
+                    )
+                )
+
+            ContactLog.objects.bulk_create(log_entries, batch_size=1000)
+
+            # Perform bulk delete
+            deleted_count = CRM.objects.filter(id__in=deal_ids).delete()[0]
+
+            return Response(
+                {
+                    "message": f"Successfully deleted {deleted_count} deals.",
+                    "deleted_count": deleted_count,
+                }
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
     @action(detail=False, methods=["post"], url_path="bulk-move-deals")
     def bulk_move_deals(self, request):
         """Bulk move deal cards (CRM entries) to a target pipeline and stage."""
@@ -1065,10 +1308,12 @@ class CRMViewSet(viewsets.ModelViewSet):
                     {"message": "No valid deals found to move.", "moved_count": 0}
                 )
 
-            # Perform bulk update
+            # Perform bulk update — reset assigned_user since target pipeline
+            # may have different user groups
             moved_count = CRM.objects.filter(id__in=deal_ids).update(
                 pipeline=pipeline,
                 stage=target_stage,
+                assigned_user=None,
             )
 
             # Create ContactLog entries in bulk (both target pipeline & source pipeline)
@@ -1122,4 +1367,3 @@ class CRMViewSet(viewsets.ModelViewSet):
             return Response(
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
