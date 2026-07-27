@@ -2,7 +2,7 @@
 
 ## Overview
 
-Deal Transforms is a 3-step wizard for selecting and moving deals into a new pipeline. It evolved from the original Lead Nurture feature, adding a **field-level filter** path alongside the traditional **stage-based** selection. Users can either pick deals by stage or filter by a specific `additional_data` key-value pair.
+Deal Transforms is a 4-step wizard for selecting and moving deals into a new pipeline. It evolved from the original Lead Nurture feature, adding a **field-level filter** path alongside the traditional **stage-based** selection. Users can either pick deals by stage or filter by a specific `additional_data` key-value pair.
 
 ---
 
@@ -12,7 +12,8 @@ Deal Transforms is a 3-step wizard for selecting and moving deals into a new pip
 |------|-------|---------|
 | 1 | Select Criteria | Choose **Stages** (multi-select) OR **Field Value** (single key-value) |
 | 2 | Target Deals | Server-paginated deal list (50/page) with search and deselect |
-| 3 | Create Pipeline | Name, description, department assignment, assignment strategy |
+| 3 | Choose Action | Select **Retargeting**, **Add to Pipeline**, or **Move to Pipeline** |
+| 4 | Pipeline Setup | Name, description, department assignment, assignment strategy |
 
 ---
 
@@ -133,21 +134,50 @@ The two filtering modes are independent — only one set of params is sent based
 
 ---
 
-## Step 3 — Create Pipeline
+## Step 3 — Choose Action
 
-- Name (required), description
-- Department selection (for staff access control)
-- Assignment strategy (round_robin, least_loaded, single_user, manual)
+Three mutually exclusive action cards with radio indicators:
+
+| Action | Description | Backend Endpoint | Behavior |
+|--------|-------------|-----------------|----------|
+| **Retargeting** (default) | Move deals into retarget pipeline, High priority, contact status → "Retarget" | `bulk-add-contacts` with `source_pipeline`, `priority: "High"` | Updates `pipeline_id` on existing CRM rows, resets `assigned_user`, sets priority=High, sets contact status=Retarget |
+| **Add to Pipeline** | Copy contacts into pipeline without altering existing deals. Creates new CRM entries | `bulk-add-to-pipeline` with `deal_ids` | Creates fresh CRM entries, preserves contact info, no status change |
+| **Move to Pipeline** | Move the deal to a new pipeline. Same CRM ID preserved, `assigned_user` reset. No status/priority change | `bulk-add-contacts` with `source_pipeline`, `priority` (preserved), `skip_contact_status_update: true` | Updates `pipeline_id` on existing CRM rows, preserves priority, no contact status change |
+
+---
+
+## Step 4 — Pipeline Setup
+
+### Pipeline Resolution
+
+- **Retargeting**: Can select an **existing** retarget pipeline from the list (fetched via `GET /api/crm/pipelines/?pipeline_type=retarget`) OR click "+ New" to create one with `pipeline_type='retarget'`
+- **Add/Move**: Always creates a new pipeline (name input + description)
+
+### Retarget Pipeline List
+
+- Wrapped in a `rounded-lg border border-zinc-800 bg-zinc-900/20` container
+- Pipelines rendered in a `grid grid-cols-2 gap-2` (2 per row)
+- Count shown inline in the label: `Available Retarget Pipelines: 10`
+- "+ New" button sits outside the container, to the right of the label
+- List has its own scroll (`max-h-44 overflow-y-auto pr-2`) inside the container
+- Selecting a pipeline populates name/description and hides the create form
+
+### Assignment
+
+- Department group selection (toggle shows searchable dropdown)
+- Assignment strategies: Single User, Round Robin, Manual (no auto-assign)
+- After moving deals, calls `POST /api/crm/pipelines/{id}/trigger-assignment/` if strategy is not manual
 
 ### Submission Flow
 
-1. Create new pipeline via `POST /api/crm/pipelines/`
-2. Fetch deals from source (with same filter path — stages or field value):
-   - If stage selection: `stages=<ids>` 
-   - If field value: `additional_field=X&additional_value=Y`
-3. Send in chunks of 500 to `POST /api/crm/pipeline/bulk-add-contacts/` with `source_pipeline`
-4. Backend **moves** deals (updates `pipeline_id`, `stage`, `priority="High"`, contact status → `"Retarget"`)
-5. Progress bar shown for >100 selected deals
+1. **Resolve target pipeline**: existing ID (retarget) or create new via `POST /api/crm/pipelines/`
+2. **Fetch deals** from source (paged at 500, same filter path — stages or field value)
+3. **Send action-specific API call** in chunks of 500:
+   - Retarget: `bulk-add-contacts` with `source_pipeline`
+   - Add: `bulk-add-to-pipeline` with `deal_ids`
+   - Move: `bulk-add-contacts` with `source_pipeline` + `skip_contact_status_update: true`
+4. **Auto-assign** if strategy is not manual (calls `trigger-assignment`)
+5. Progress bar shown during processing
 
 ---
 
@@ -189,10 +219,20 @@ Response:
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/crm/pipeline/` | List deals, filterable by pipeline/stages/additional_field |
+| POST | `/api/crm/pipeline/bulk-add-contacts/` | Move deals to pipeline. Optional: `priority` (default "High"), `skip_contact_status_update` (default false) |
+| POST | `/api/crm/pipeline/bulk-add-to-pipeline/` | Copy deals to pipeline (new CRM entries) |
 
 New query params for field filtering:
 - `additional_field` — key name in contact's `additional_data`
 - `additional_value` — exact value to match
+
+---
+
+## Step 4 — Pipeline Type on Create
+
+When creating a new pipeline from the wizard, the `pipeline_type` is set based on the action:
+- `retarget` for Retargeting action (so the pipeline appears in retarget pipeline lists)
+- Not set (null/default) for Add/Move actions
 
 ---
 
@@ -213,7 +253,7 @@ New query params for field filtering:
 
 | Component | Path | Purpose |
 |-----------|------|---------|
-| `LeadNurtureModal.jsx` | `crm/components/` | 3-step transform wizard (replaced Lead Nurture) |
+| `LeadNurtureModal.jsx` | `crm/components/` | 4-step transform wizard (replaced Lead Nurture) |
 | `LeadSettingsModal.jsx` | `crm/components/` | Configure mandatory fields + Track Fields |
 | `AddToCRMModal.jsx` | `contacts/components/` | Add contacts from imports to CRM pipeline |
 | `Tooltip` | `components/ui/tooltip.jsx` | Tooltip for disabled state (custom fields not enabled) |
@@ -239,6 +279,18 @@ fields = ["id", "name", "email", "phone", "status", "contact_id", "source", "add
 
 ---
 
+## Action Comparison
+
+| Aspect | Retarget | Add | Move |
+|--------|----------|-----|------|
+| **Operation** | MOVE (update pipeline_id) | COPY (new CRM entries) | MOVE (update pipeline_id) |
+| **Priority** | Set to "High" | Set to "Medium" | Preserved from source |
+| **Contact Status** | Changed to "Retarget" | Unchanged | Unchanged |
+| **Deal IDs** | Same IDs preserved | New IDs created | Same IDs preserved |
+| **Use Case** | Retargeting campaign | Cross-pipeline listing | Pipeline reorganization |
+
+---
+
 ## Known Limitations & Edge Cases
 
 1. **Field value filter matches exact values** — `__contains` uses JSONB containment, which is exact for strings but not for partial matches
@@ -246,3 +298,4 @@ fields = ["id", "name", "email", "phone", "status", "contact_id", "source", "add
 3. **No combined mode** — stages and field value cannot be used together; they are mutually exclusive paths
 4. **System fields are not queryable** for value distribution — they're direct DB columns, not keys in `additional_data`
 5. **Keys with special characters** — `additional_data` keys with spaces or special characters work via `->>` operator
+6. **Contact dedup on move** — If a contact has multiple deals in the source pipeline, all move together since the API filters by `contact_id__in`. The UI shows individual deals, but the backend moves by contact.

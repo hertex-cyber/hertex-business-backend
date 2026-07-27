@@ -34,6 +34,9 @@ class PipelineViewSet(viewsets.ModelViewSet):
         qs = super().get_queryset()
         if user.is_authenticated and user.role == "Staff":
             qs = qs.filter(departments__in=user.departments.all()).distinct()
+        pipeline_type = self.request.query_params.get("pipeline_type")
+        if pipeline_type:
+            qs = qs.filter(pipeline_type=pipeline_type)
         return qs
 
     def perform_create(self, serializer):
@@ -990,6 +993,10 @@ class CRMViewSet(viewsets.ModelViewSet):
         pipeline_id = request.data.get("pipeline_id")
         contact_ids = request.data.get("contact_ids", [])
         source_pipeline = request.data.get("source_pipeline")
+        priority = request.data.get("priority", "High")
+        skip_contact_status_update = request.data.get(
+            "skip_contact_status_update", False
+        )
 
         if not pipeline_id or not contact_ids:
             return Response(
@@ -1031,12 +1038,13 @@ class CRMViewSet(viewsets.ModelViewSet):
                 ).update(
                     pipeline_id=pipeline_id,
                     stage=first_stage,
-                    priority="High",
+                    priority=priority,
                     assigned_user=None,
                 )
 
-                # Update contact statuses to Retarget
-                Contact.objects.filter(id__in=contact_ids).update(status="Retarget")
+                # Update contact statuses to Retarget (unless skipped for plain move)
+                if not skip_contact_status_update:
+                    Contact.objects.filter(id__in=contact_ids).update(status="Retarget")
 
                 # Activity logs
                 from contacts.models import ContactLog
@@ -1061,9 +1069,10 @@ class CRMViewSet(viewsets.ModelViewSet):
                 print(
                     f"[TIMING] source_pipeline branch: {time.time() - _t0:.3f}s | queries={len(connection.queries) - _q0} | contacts={len(contact_ids)}"
                 )
+                action_label = "moved" if skip_contact_status_update else "retargeted"
                 return Response(
                     {
-                        "message": f"Successfully moved {moved_count} deals to retarget pipeline.",
+                        "message": f"Successfully {action_label} {moved_count} deals to pipeline.",
                         "moved_count": moved_count,
                     }
                 )
