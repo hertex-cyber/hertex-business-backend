@@ -26,6 +26,8 @@ class ImportBatchViewSet(viewsets.ModelViewSet):
     queryset = ImportBatch.objects.all()
     serializer_class = ImportBatchSerializer
     permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ["name"]
 
     def perform_destroy(self, instance):
         qs = Contact.objects.filter(import_batch=instance)
