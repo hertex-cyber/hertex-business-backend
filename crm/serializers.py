@@ -66,7 +66,16 @@ class PipelineSerializer(serializers.ModelSerializer):
 class ContactBriefSerializer(serializers.ModelSerializer):
     class Meta:
         model = Contact
-        fields = ["id", "name", "email", "phone", "status", "contact_id"]
+        fields = [
+            "id",
+            "name",
+            "email",
+            "phone",
+            "status",
+            "contact_id",
+            "additional_data",
+            "source",
+        ]
 
 
 class CRMSerializer(serializers.ModelSerializer):

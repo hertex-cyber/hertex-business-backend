@@ -92,6 +92,85 @@ class ContactViewSet(viewsets.ModelViewSet):
         if batch and not batch.contacts.exists():
             batch.delete()
 
+    @action(detail=False, methods=["get"], url_path="track-field-values")
+    def track_field_values(self, request):
+        """Return value distribution for a specific additional_data field key."""
+        field = request.query_params.get("field")
+        pipeline_id = request.query_params.get("pipeline_id")
+
+        if not field:
+            return Response(
+                {"error": "field parameter is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            if pipeline_id:
+                cursor.execute(
+                    "SELECT c.additional_data->>%s AS val, COUNT(*) AS cnt "
+                    "FROM contacts_contact c "
+                    "JOIN crm_crm deal ON deal.contact_id = c.id "
+                    "WHERE deal.pipeline_id = %s "
+                    "AND c.additional_data ? %s "
+                    "GROUP BY val ORDER BY cnt DESC",
+                    [field, pipeline_id, field],
+                )
+            else:
+                cursor.execute(
+                    "SELECT additional_data->>%s AS val, COUNT(*) AS cnt "
+                    "FROM contacts_contact "
+                    "WHERE additional_data ? %s "
+                    "GROUP BY val ORDER BY cnt DESC",
+                    [field, field],
+                )
+            rows = cursor.fetchall()
+
+        values = [{"value": row[0], "count": row[1]} for row in rows]
+        total = sum(row[1] for row in rows)
+        return Response({"field": field, "total": total, "values": values})
+
+    @action(detail=False, methods=["get"], url_path="track-fields")
+    def track_fields(self, request):
+        """Return all unique keys from additional_data JSONB for contacts in a pipeline."""
+        from django.db import connection
+
+        pipeline_id = request.query_params.get("pipeline_id")
+
+        with connection.cursor() as cursor:
+            if pipeline_id:
+                cursor.execute(
+                    "SELECT DISTINCT jsonb_object_keys(c.additional_data) "
+                    "FROM contacts_contact c "
+                    "JOIN crm_crm deal ON deal.contact_id = c.id "
+                    "WHERE deal.pipeline_id = %s "
+                    "AND c.additional_data IS NOT NULL "
+                    "AND c.additional_data != '{}'::jsonb",
+                    [pipeline_id],
+                )
+            else:
+                cursor.execute(
+                    "SELECT DISTINCT jsonb_object_keys(additional_data) "
+                    "FROM contacts_contact "
+                    "WHERE additional_data IS NOT NULL AND additional_data != '{}'::jsonb"
+                )
+            keys = [row[0] for row in cursor.fetchall()]
+
+        system_fields = {
+            "name",
+            "email",
+            "phone",
+            "status",
+            "contact_id",
+            "source",
+            "id",
+            "created_at",
+            "updated_at",
+        }
+        filtered = [k for k in keys if k.lower() not in system_fields]
+        return Response({"fields": filtered})
+
     @action(detail=False, methods=["post"], url_path="bulk-create")
     def bulk_create(self, request):
         data = request.data
@@ -189,7 +268,9 @@ class ContactViewSet(viewsets.ModelViewSet):
 
 
 class ContactLogViewSet(viewsets.ModelViewSet):
-    queryset = ContactLog.objects.all().select_related("contact", "crm", "crm__pipeline", "user")
+    queryset = ContactLog.objects.all().select_related(
+        "contact", "crm", "crm__pipeline", "user"
+    )
     serializer_class = ContactLogSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -249,7 +330,9 @@ class ContactRemarkViewSet(viewsets.ModelViewSet):
             user=remark.user,
             activity_type="Remark Added",
             description=f'Added an update: "{remark.text}"',
-            pipeline_name=remark.crm.pipeline.name if remark.crm and remark.crm.pipeline else None,
+            pipeline_name=remark.crm.pipeline.name
+            if remark.crm and remark.crm.pipeline
+            else None,
         )
 
 

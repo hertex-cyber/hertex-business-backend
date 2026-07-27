@@ -26,6 +26,7 @@ class ContactListSerializer(serializers.ModelSerializer):
             "status",
             "contact_id",
             "source",
+            "additional_data",
             "created_at",
         ]
         read_only_fields = fields
