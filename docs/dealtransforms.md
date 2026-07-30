@@ -2,7 +2,7 @@
 
 ## Overview
 
-Deal Transforms is a 4-step wizard for selecting and moving deals into a new pipeline. It evolved from the original Lead Nurture feature, adding a **field-level filter** path alongside the traditional **stage-based** selection. Users can either pick deals by stage or filter by a specific `additional_data` key-value pair.
+Deal Transforms is a 4-step wizard (`LeadNurtureModal.jsx`) for bulk-operating on deals across pipelines. It supports three actions: **Retarget**, **Add to Pipeline**, and **Move to Pipeline**. Simpler single-step alternatives (`MultipleDealMove.jsx`, `MultipleDealAdd.jsx`) exist for quick operations from the KanbanBoard's select mode.
 
 ---
 
@@ -13,7 +13,7 @@ Deal Transforms is a 4-step wizard for selecting and moving deals into a new pip
 | 1 | Select Criteria | Choose **Stages** (multi-select) OR **Field Value** (single key-value) |
 | 2 | Target Deals | Server-paginated deal list (50/page) with search and deselect |
 | 3 | Choose Action | Select **Retargeting**, **Add to Pipeline**, or **Move to Pipeline** |
-| 4 | Pipeline Setup | Name, description, department assignment, assignment strategy |
+| 4 | Pipeline Setup | Pick existing pipeline or create new one, configure assignment |
 
 ---
 
@@ -141,8 +141,8 @@ Three mutually exclusive action cards with radio indicators:
 | Action | Description | Backend Endpoint | Behavior |
 |--------|-------------|-----------------|----------|
 | **Retargeting** (default) | Move deals into retarget pipeline, High priority, contact status → "Retarget" | `bulk-add-contacts` with `source_pipeline`, `priority: "High"` | Updates `pipeline_id` on existing CRM rows, resets `assigned_user`, sets priority=High, sets contact status=Retarget |
-| **Add to Pipeline** | Copy contacts into pipeline without altering existing deals. Creates new CRM entries | `bulk-add-to-pipeline` with `deal_ids` | Creates fresh CRM entries, preserves contact info, no status change |
-| **Move to Pipeline** | Move the deal to a new pipeline. Same CRM ID preserved, `assigned_user` reset. No status/priority change | `bulk-add-contacts` with `source_pipeline`, `priority` (preserved), `skip_contact_status_update: true` | Updates `pipeline_id` on existing CRM rows, preserves priority, no contact status change |
+| **Add to Pipeline** | Copy contacts into pipeline without altering existing deals. Creates new CRM entries | `bulk-add-to-pipeline` with `deal_ids` | Creates fresh CRM entries, preserves contact info, priority preserved from source. Auto-assigns if pipeline strategy is round_robin/least_loaded |
+| **Move to Pipeline** | Move the deal to a new pipeline. Same CRM ID preserved, `assigned_user` reset. No status/priority change | `bulk-move-deals` with `deal_ids` + `pipeline_id` | Updates `pipeline_id` on existing CRM rows, sets `assigned_user=None`, preserves priority and contact status |
 
 ---
 
@@ -150,33 +150,36 @@ Three mutually exclusive action cards with radio indicators:
 
 ### Pipeline Resolution
 
-- **Retargeting**: Can select an **existing** retarget pipeline from the list (fetched via `GET /api/crm/pipelines/?pipeline_type=retarget`) OR click "+ New" to create one with `pipeline_type='retarget'`
-- **Add/Move**: Always creates a new pipeline (name input + description)
+All three actions share the same pipeline selection UI:
+- **Pipeline list** displayed in a `grid grid-cols-2 gap-2` with count inline: `Available Sales Pipelines: N`
+- **"+ New" button** toggles a create form (pipeline name + description)
+- Pipelines with `custom_fields_enabled=true` are **disabled** with a tooltip ("Cannot select custom field enabled pipeline")
 
-### Retarget Pipeline List
-
-- Wrapped in a `rounded-lg border border-zinc-800 bg-zinc-900/20` container
-- Pipelines rendered in a `grid grid-cols-2 gap-2` (2 per row)
-- Count shown inline in the label: `Available Retarget Pipelines: 10`
-- "+ New" button sits outside the container, to the right of the label
-- List has its own scroll (`max-h-44 overflow-y-auto pr-2`) inside the container
-- Selecting a pipeline populates name/description and hides the create form
+Pipeline type on create:
+- `retarget` for Retargeting action (so the pipeline appears in retarget pipeline lists)
+- Not set (null/default) for Add/Move actions
 
 ### Assignment
 
+#### New Pipeline (clicked "+ New")
 - Department group selection (toggle shows searchable dropdown)
-- Assignment strategies: Single User, Round Robin, Manual (no auto-assign)
+- Assignment strategies: Single User, Round Robin (Least Loaded available in backend but not exposed in UI)
 - After moving deals, calls `POST /api/crm/pipelines/{id}/trigger-assignment/` if strategy is not manual
+
+#### Existing Pipeline (selected from list)
+- Automatically reads the pipeline's own `assignment_type`
+- Auto-triggers assignment for `round_robin` / `least_loaded` strategies (no explicit trigger for `single_user` since target user is unknown)
+- No assignment UI shown (pipeline already configured)
 
 ### Submission Flow
 
-1. **Resolve target pipeline**: existing ID (retarget) or create new via `POST /api/crm/pipelines/`
-2. **Fetch deals** from source (paged at 500, same filter path — stages or field value)
-3. **Send action-specific API call** in chunks of 500:
+1. **Resolve target pipeline**: existing ID or create new via `POST /api/crm/pipelines/`
+2. **Fetch deals** from source (page=1, page_size=500, uses `processedDealIds` Set to prevent re-processing duplicate deals — the backend's `/api/crm/pipeline/` endpoint does not support page > 1)
+3. **Send action-specific API call** in chunks of 500 (iterates page 1 until all deals exhausted):
    - Retarget: `bulk-add-contacts` with `source_pipeline`
    - Add: `bulk-add-to-pipeline` with `deal_ids`
-   - Move: `bulk-add-contacts` with `source_pipeline` + `skip_contact_status_update: true`
-4. **Auto-assign** if strategy is not manual (calls `trigger-assignment`)
+   - Move: `bulk-move-deals` with `deal_ids` + `stage_id`
+4. **Auto-assign** if applicable (new pipeline with non-manual strategy, or existing pipeline with round_robin/least_loaded)
 5. Progress bar shown during processing
 
 ---
@@ -219,63 +222,16 @@ Response:
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/crm/pipeline/` | List deals, filterable by pipeline/stages/additional_field |
-| POST | `/api/crm/pipeline/bulk-add-contacts/` | Move deals to pipeline. Optional: `priority` (default "High"), `skip_contact_status_update` (default false) |
-| POST | `/api/crm/pipeline/bulk-add-to-pipeline/` | Copy deals to pipeline (new CRM entries) |
+| POST | `/api/crm/pipeline/bulk-add-contacts/` | Move deals (update pipeline_id). Optional: `priority`, `skip_contact_status_update` |
+| POST | `/api/crm/pipeline/bulk-add-to-pipeline/` | Copy deals to pipeline (new CRM entries). Preserves priority. Auto-assigns if pipeline has round_robin/least_loaded |
+| POST | `/api/crm/pipeline/bulk-move-deals/` | Move deals to pipeline (update pipeline_id). Resets `assigned_user=None`. Takes `deal_ids`, `pipeline_id`, `stage_id` |
+| POST | `/api/crm/pipeline/bulk-delete-deals/` | Bulk delete CRM entries with logging |
 
-New query params for field filtering:
-- `additional_field` — key name in contact's `additional_data`
-- `additional_value` — exact value to match
+### Backend — Pipeline Endpoints
 
----
-
-## Step 4 — Pipeline Type on Create
-
-When creating a new pipeline from the wizard, the `pipeline_type` is set based on the action:
-- `retarget` for Retargeting action (so the pipeline appears in retarget pipeline lists)
-- Not set (null/default) for Add/Move actions
-
----
-
-## Key Differences: Stage Selection vs Field Selection
-
-| Aspect | Stages Tab | Fields Tab |
-|--------|-----------|------------|
-| **Selection type** | Multi-select cards | Single-select (one field, one value) |
-| **Data source** | Pipeline stages | `mandatory_fields` from pipeline config |
-| **System fields** | N/A | Disabled (Name, Email, Phone) |
-| **Filter backend** | `stage_id__in` | `contact__additional_data__contains` |
-| **API param** | `stages=<ids>` | `additional_field=X&additional_value=Y` |
-| **Validation** | "Select at least one stage" | "Select a field value pair" |
-
----
-
-## Related Components
-
-| Component | Path | Purpose |
-|-----------|------|---------|
-| `LeadNurtureModal.jsx` | `crm/components/` | 4-step transform wizard (replaced Lead Nurture) |
-| `LeadSettingsModal.jsx` | `crm/components/` | Configure mandatory fields + Track Fields |
-| `AddToCRMModal.jsx` | `contacts/components/` | Add contacts from imports to CRM pipeline |
-| `Tooltip` | `components/ui/tooltip.jsx` | Tooltip for disabled state (custom fields not enabled) |
-
----
-
-## Serializer Changes
-
-### ContactBriefSerializer (`crm/serializers.py`)
-Added `additional_data` and `source` to expose contact's unstructured data in CRM deal responses:
-```python
-class ContactBriefSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Contact
-        fields = ["id", "name", "email", "phone", "status", "contact_id", "additional_data", "source"]
-```
-
-### ContactListSerializer (`contacts/serializers.py`)
-Added `additional_data` to ensure the contacts list API returns it:
-```python
-fields = ["id", "name", "email", "phone", "status", "contact_id", "source", "additional_data", "created_at"]
-```
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/crm/pipelines/{id}/trigger-assignment/` | Assign unassigned deals using pipeline's strategy. Accepts `strategy`, `target_user_id` (for single_user) |
 
 ---
 
@@ -284,10 +240,37 @@ fields = ["id", "name", "email", "phone", "status", "contact_id", "source", "add
 | Aspect | Retarget | Add | Move |
 |--------|----------|-----|------|
 | **Operation** | MOVE (update pipeline_id) | COPY (new CRM entries) | MOVE (update pipeline_id) |
-| **Priority** | Set to "High" | Set to "Medium" | Preserved from source |
+| **Priority** | Set to "High" | Preserved from source | Preserved from source |
 | **Contact Status** | Changed to "Retarget" | Unchanged | Unchanged |
+| **assigned_user** | Reset to None | Depends on pipeline strategy (None / round_robin / least_loaded) | Reset to None |
 | **Deal IDs** | Same IDs preserved | New IDs created | Same IDs preserved |
+| **Backend Endpoint** | `bulk-add-contacts` | `bulk-add-to-pipeline` | `bulk-move-deals` |
 | **Use Case** | Retargeting campaign | Cross-pipeline listing | Pipeline reorganization |
+
+---
+
+## Related Components
+
+### `MultipleDealMove.jsx` & `MultipleDealAdd.jsx`
+
+Single-step modals accessible from KanbanBoard's select mode. Simpler than LeadNurtureModal:
+- Receive pre-selected `dealIds` as props (no dynamic fetching or pagination)
+- Show pipeline list with simple name-only create form (no departments/assignment strategy)
+- Chunk via `Array.slice()` in a `for` loop (no API pagination needed)
+- **No trigger-assignment call** — deals land unassigned unless the pipeline's backend auto-assigns (bulk-add-to-pipeline auto-assigns for round_robin/least_loaded; bulk-move-deals always resets to None)
+
+### Component Map
+
+| Component | Path | Purpose |
+|-----------|------|---------|
+| `LeadNurtureModal.jsx` | `crm/components/` | 4-step transform wizard |
+| `MultipleDealMove.jsx` | `crm/components/` | Quick single-step move from KanbanBoard |
+| `MultipleDealAdd.jsx` | `crm/components/` | Quick single-step add from KanbanBoard |
+| `LeadSettingsModal.jsx` | `crm/components/` | Configure mandatory fields + Track Fields |
+| `SingleDealMove.jsx` | `crm/components/` | Single deal move from KanbanCard context menu |
+| `SingleDealAdd.jsx` | `crm/components/` | Single deal add from KanbanCard context menu |
+| `AddToCRMModal.jsx` | `contacts/components/` | Add contacts from imports to CRM pipeline |
+| `Tooltip` | `components/ui/tooltip.jsx` | Tooltip for disabled state (custom fields not enabled) |
 
 ---
 
@@ -299,3 +282,6 @@ fields = ["id", "name", "email", "phone", "status", "contact_id", "source", "add
 4. **System fields are not queryable** for value distribution — they're direct DB columns, not keys in `additional_data`
 5. **Keys with special characters** — `additional_data` keys with spaces or special characters work via `->>` operator
 6. **Contact dedup on move** — If a contact has multiple deals in the source pipeline, all move together since the API filters by `contact_id__in`. The UI shows individual deals, but the backend moves by contact.
+7. **Pagination** — The `/api/crm/pipeline/` list endpoint does not support `page > 1`; the frontend works around this by re-fetching page 1 with a `processedDealIds` Set to skip already-processed deals
+8. **Existing pipeline assignment** — When using existing pipelines, only `round_robin` and `least_loaded` strategies auto-trigger. `single_user` requires a target user ID not available from pipeline selection alone; user must create a new pipeline to configure single_user assignment.
+9. **Custom field pipelines disabled** — Pipelines with `custom_fields_enabled=true` cannot be selected as target in step 4; a tooltip explains the restriction.

@@ -1371,7 +1371,7 @@ class CRMViewSet(viewsets.ModelViewSet):
                 assigned_user=None,
             )
 
-            # Create ContactLog entries in bulk (both target pipeline & source pipeline)
+            # Create ContactLog entry with full context
             from contacts.models import ContactLog
 
             log_entries = []
@@ -1380,30 +1380,20 @@ class CRMViewSet(viewsets.ModelViewSet):
                 new_pipeline_name = pipeline.name
                 stage_name = target_stage.name if target_stage else "Default"
 
-                # Log for target pipeline
+                description = f"Moved to pipeline '{new_pipeline_name}' under stage '{stage_name}'"
+                if old_pipeline_name and old_pipeline_name != new_pipeline_name:
+                    description = f"Moved from pipeline '{old_pipeline_name}' to '{new_pipeline_name}' under stage '{stage_name}'"
+
                 log_entries.append(
                     ContactLog(
                         contact=crm.contact,
                         crm=crm,
                         activity_type="Pipeline Changed",
-                        description=f"Moved to pipeline '{new_pipeline_name}' under stage '{stage_name}'",
+                        description=description,
                         user=request.user,
                         pipeline_name=new_pipeline_name,
                     )
                 )
-
-                # Log for source pipeline if different
-                if old_pipeline_name and old_pipeline_name != new_pipeline_name:
-                    log_entries.append(
-                        ContactLog(
-                            contact=crm.contact,
-                            crm=crm,
-                            activity_type="Pipeline Changed",
-                            description=f"Moved from pipeline '{old_pipeline_name}' to '{new_pipeline_name}' under stage '{stage_name}'",
-                            user=request.user,
-                            pipeline_name=old_pipeline_name,
-                        )
-                    )
 
             ContactLog.objects.bulk_create(log_entries, batch_size=1000)
 
