@@ -308,8 +308,18 @@ class CRMViewSet(viewsets.ModelViewSet):
         pipeline_id = self.request.query_params.get("pipeline")
         assigned_user_id = self.request.query_params.get("assigned_user")
         search = self.request.query_params.get("search")
+        exclude_ids = self.request.query_params.get("exclude_ids")
+        exclude_pipeline_id = self.request.query_params.get("exclude_pipeline_id")
         additional_field = self.request.query_params.get("additional_field")
         additional_value = self.request.query_params.get("additional_value")
+
+        if exclude_ids:
+            ids = [int(id) for id in exclude_ids.split(",") if id]
+            if ids:
+                qs = qs.exclude(id__in=ids)
+
+        if exclude_pipeline_id:
+            qs = qs.exclude(contact__crm_pipelines__pipeline_id=exclude_pipeline_id)
 
         if additional_field and additional_value:
             qs = qs.filter(
@@ -756,21 +766,6 @@ class CRMViewSet(viewsets.ModelViewSet):
                             or crm_entry.assigned_user.email,
                             user=request.user,
                             pipeline_name=target_pipeline.name,
-                        )
-                    )
-
-                # Also log on source deal
-                if source_deal:
-                    log_entries.append(
-                        ContactLog(
-                            contact=source_deal.contact,
-                            crm=source_deal,
-                            activity_type="Pipeline Changed",
-                            description=f"Copied to pipeline '{target_pipeline.name}'",
-                            user=request.user,
-                            pipeline_name=source_deal.pipeline.name
-                            if source_deal.pipeline
-                            else None,
                         )
                     )
 

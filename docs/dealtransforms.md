@@ -174,7 +174,9 @@ Pipeline type on create:
 ### Submission Flow
 
 1. **Resolve target pipeline**: existing ID or create new via `POST /api/crm/pipelines/`
-2. **Fetch deals** from source (page=1, page_size=500, uses `processedDealIds` Set to prevent re-processing duplicate deals — the backend's `/api/crm/pipeline/` endpoint does not support page > 1)
+2. **Fetch deals** from source in a drain loop (page=1, page_size=500, re-fetches until empty):
+   - **Move/Retarget**: source naturally drains since deals are removed from source on each chunk — re-fetching page 1 returns fresh deals
+   - **Add**: source never drains (deals are copied, not moved), so the frontend accumulates processed `deal_ids` and passes them as `exclude_ids` query param to skip already-copied deals on each re-fetch
 3. **Send action-specific API call** in chunks of 500 (iterates page 1 until all deals exhausted):
    - Retarget: `bulk-add-contacts` with `source_pipeline`
    - Add: `bulk-add-to-pipeline` with `deal_ids`
@@ -221,7 +223,7 @@ Response:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/crm/pipeline/` | List deals, filterable by pipeline/stages/additional_field |
+| GET | `/api/crm/pipeline/` | List deals, filterable by pipeline/stages/additional_field/exclude_ids |
 | POST | `/api/crm/pipeline/bulk-add-contacts/` | Move deals (update pipeline_id). Optional: `priority`, `skip_contact_status_update` |
 | POST | `/api/crm/pipeline/bulk-add-to-pipeline/` | Copy deals to pipeline (new CRM entries). Preserves priority. Auto-assigns if pipeline has round_robin/least_loaded |
 | POST | `/api/crm/pipeline/bulk-move-deals/` | Move deals to pipeline (update pipeline_id). Resets `assigned_user=None`. Takes `deal_ids`, `pipeline_id`, `stage_id` |
@@ -282,6 +284,6 @@ Single-step modals accessible from KanbanBoard's select mode. Simpler than LeadN
 4. **System fields are not queryable** for value distribution — they're direct DB columns, not keys in `additional_data`
 5. **Keys with special characters** — `additional_data` keys with spaces or special characters work via `->>` operator
 6. **Contact dedup on move** — If a contact has multiple deals in the source pipeline, all move together since the API filters by `contact_id__in`. The UI shows individual deals, but the backend moves by contact.
-7. **Pagination** — The `/api/crm/pipeline/` list endpoint does not support `page > 1`; the frontend works around this by re-fetching page 1 with a `processedDealIds` Set to skip already-processed deals
+7. **Pagination** — The `/api/crm/pipeline/` list endpoint does not support `page > 1`; the frontend works around this by re-fetching page 1 in a drain loop. Move/Retarget rely on the source draining naturally. Add uses the `exclude_ids` query param to skip already-processed deals on each re-fetch (supported by `CRMViewSet.get_queryset`).
 8. **Existing pipeline assignment** — When using existing pipelines, only `round_robin` and `least_loaded` strategies auto-trigger. `single_user` requires a target user ID not available from pipeline selection alone; user must create a new pipeline to configure single_user assignment.
 9. **Custom field pipelines disabled** — Pipelines with `custom_fields_enabled=true` cannot be selected as target in step 4; a tooltip explains the restriction.
