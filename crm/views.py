@@ -204,6 +204,51 @@ class PipelineViewSet(viewsets.ModelViewSet):
             }
         )
 
+    @action(detail=True, methods=["post"], url_path="delete-chunk")
+    def delete_chunk(self, request, pk=None):
+        """Delete up to `limit` deals from a pipeline. Deletes the pipeline itself when empty."""
+        pipeline = self.get_object()
+        limit = int(request.data.get("limit", 500))
+
+        total = CRM.objects.filter(pipeline=pipeline).count()
+        ids = list(
+            CRM.objects.filter(pipeline=pipeline)
+            .order_by("id")
+            .values_list("id", flat=True)[:limit]
+        )
+
+        if ids:
+            from contacts.models import ContactLog
+
+            deals_to_delete = list(
+                CRM.objects.filter(id__in=ids).select_related("contact", "pipeline")
+            )
+
+            log_entries = []
+            for crm in deals_to_delete:
+                log_entries.append(
+                    ContactLog(
+                        contact=crm.contact,
+                        crm=None,
+                        activity_type="Deal Deleted",
+                        description=f"Deal removed from pipeline '{crm.pipeline.name}'"
+                        if crm.pipeline
+                        else "Deal deleted",
+                        user=request.user,
+                        pipeline_name=crm.pipeline.name if crm.pipeline else None,
+                    )
+                )
+
+            ContactLog.objects.bulk_create(log_entries, batch_size=1000)
+            CRM.objects.filter(id__in=ids).delete()
+
+        remaining = CRM.objects.filter(pipeline=pipeline).count()
+
+        if remaining == 0:
+            pipeline.delete()
+
+        return Response({"deleted": len(ids), "total": total, "remaining": remaining})
+
 
 class StageViewSet(viewsets.ModelViewSet):
     serializer_class = StageSerializer
