@@ -139,6 +139,9 @@ class CalendarTodo(models.Model):
         if self.todo_type == "followup" and self.start:
             if self.start < timezone.now() and self.status == "follow_up":
                 self.status = "failed"
+            elif self.status == "failed" and self.start > timezone.now():
+                self.status = "follow_up"
+                self.followup_failed = None
 
         if self.todo_type in ("event", "meeting"):
             self.status = self.compute_event_status(self.start, self.end, self.status)
