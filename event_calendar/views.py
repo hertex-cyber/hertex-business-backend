@@ -37,6 +37,14 @@ class CalendarTodoViewSet(viewsets.ModelViewSet):
         if pipeline:
             qs = qs.filter(pipeline_id=pipeline)
 
+        crm = self.request.query_params.get("crm")
+        if crm:
+            qs = qs.filter(crm_id=crm)
+
+        contact = self.request.query_params.get("contact")
+        if contact:
+            qs = qs.filter(contact_id=contact)
+
         start = self.request.query_params.get("start")
         end = self.request.query_params.get("end")
         if start and end:

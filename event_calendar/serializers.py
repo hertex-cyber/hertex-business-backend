@@ -43,6 +43,7 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             "end",
             "contact",
             "pipeline",
+            "crm",
             "pipeline_name",
             "location",
             "status",
@@ -187,6 +188,10 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                 if "contact" in data and not data.get("contact"):
                     raise serializers.ValidationError(
                         {"contact": "Contact cannot be cleared."}
+                    )
+                if "crm" in data and not data.get("crm"):
+                    raise serializers.ValidationError(
+                        {"crm": "CRM deal cannot be cleared."}
                     )
             status = data.get("status")
             valid_statuses = [s[0] for s in CalendarTodo.FOLLOWUP_STATUS_CHOICES]

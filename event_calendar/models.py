@@ -91,6 +91,14 @@ class CalendarTodo(models.Model):
         related_name="followups",
     )
 
+    crm = models.ForeignKey(
+        "crm.CRM",
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="followups",
+    )
+
     assigned_to = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
