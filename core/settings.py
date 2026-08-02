@@ -81,7 +81,7 @@ MIDDLEWARE = [
 ]
 
 
-# CORS Configuration
+# CORS Configurations
 CORS_ALLOW_ALL_ORIGINS = os.getenv("CORS_ALLOW_ALL_ORIGINS", "False") == "True"
 CORS_ALLOW_CREDENTIALS = True
 # Parse CORS_ALLOWED_ORIGINS from environment (comma-separated)

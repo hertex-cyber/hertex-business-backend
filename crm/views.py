@@ -34,6 +34,9 @@ class PipelineViewSet(viewsets.ModelViewSet):
         qs = super().get_queryset()
         if user.is_authenticated and user.role == "Staff":
             qs = qs.filter(departments__in=user.departments.all()).distinct()
+        pipeline_type = self.request.query_params.get("pipeline_type")
+        if pipeline_type:
+            qs = qs.filter(pipeline_type=pipeline_type)
         return qs
 
     def perform_create(self, serializer):
@@ -201,6 +204,51 @@ class PipelineViewSet(viewsets.ModelViewSet):
             }
         )
 
+    @action(detail=True, methods=["post"], url_path="delete-chunk")
+    def delete_chunk(self, request, pk=None):
+        """Delete up to `limit` deals from a pipeline. Deletes the pipeline itself when empty."""
+        pipeline = self.get_object()
+        limit = int(request.data.get("limit", 500))
+
+        total = CRM.objects.filter(pipeline=pipeline).count()
+        ids = list(
+            CRM.objects.filter(pipeline=pipeline)
+            .order_by("id")
+            .values_list("id", flat=True)[:limit]
+        )
+
+        if ids:
+            from contacts.models import ContactLog
+
+            deals_to_delete = list(
+                CRM.objects.filter(id__in=ids).select_related("contact", "pipeline")
+            )
+
+            log_entries = []
+            for crm in deals_to_delete:
+                log_entries.append(
+                    ContactLog(
+                        contact=crm.contact,
+                        crm=None,
+                        activity_type="Deal Deleted",
+                        description=f"Deal removed from pipeline '{crm.pipeline.name}'"
+                        if crm.pipeline
+                        else "Deal deleted",
+                        user=request.user,
+                        pipeline_name=crm.pipeline.name if crm.pipeline else None,
+                    )
+                )
+
+            ContactLog.objects.bulk_create(log_entries, batch_size=1000)
+            CRM.objects.filter(id__in=ids).delete()
+
+        remaining = CRM.objects.filter(pipeline=pipeline).count()
+
+        if remaining == 0:
+            pipeline.delete()
+
+        return Response({"deleted": len(ids), "total": total, "remaining": remaining})
+
 
 class StageViewSet(viewsets.ModelViewSet):
     serializer_class = StageSerializer
@@ -305,6 +353,23 @@ class CRMViewSet(viewsets.ModelViewSet):
         pipeline_id = self.request.query_params.get("pipeline")
         assigned_user_id = self.request.query_params.get("assigned_user")
         search = self.request.query_params.get("search")
+        exclude_ids = self.request.query_params.get("exclude_ids")
+        exclude_pipeline_id = self.request.query_params.get("exclude_pipeline_id")
+        additional_field = self.request.query_params.get("additional_field")
+        additional_value = self.request.query_params.get("additional_value")
+
+        if exclude_ids:
+            ids = [int(id) for id in exclude_ids.split(",") if id]
+            if ids:
+                qs = qs.exclude(id__in=ids)
+
+        if exclude_pipeline_id:
+            qs = qs.exclude(contact__crm_pipelines__pipeline_id=exclude_pipeline_id)
+
+        if additional_field and additional_value:
+            qs = qs.filter(
+                contact__additional_data__contains={additional_field: additional_value}
+            )
 
         if stage_id:
             qs = qs.filter(stage_id=stage_id)
@@ -497,11 +562,14 @@ class CRMViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
         from contacts.models import ContactLog
+
         ContactLog.objects.create(
             contact=instance.contact,
             crm=None,
             activity_type="Deal Deleted",
-            description=f"Deal removed from pipeline '{instance.pipeline.name}'" if instance.pipeline else "Deal deleted",
+            description=f"Deal removed from pipeline '{instance.pipeline.name}'"
+            if instance.pipeline
+            else "Deal deleted",
             user=request.user,
             pipeline_name=instance.pipeline.name if instance.pipeline else None,
         )
@@ -513,7 +581,9 @@ class CRMViewSet(viewsets.ModelViewSet):
         source = self.get_object()
         target_pipeline_id = request.data.get("pipeline_id")
         if not target_pipeline_id:
-            return Response({"error": "pipeline_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "pipeline_id is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         from crm.models import Pipeline, Stage
         from contacts.models import ContactLog
@@ -521,9 +591,13 @@ class CRMViewSet(viewsets.ModelViewSet):
         try:
             target_pipeline = Pipeline.objects.get(id=target_pipeline_id)
         except Pipeline.DoesNotExist:
-            return Response({"error": "Target pipeline not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Target pipeline not found"}, status=status.HTTP_404_NOT_FOUND
+            )
 
-        first_stage = Stage.objects.filter(pipeline=target_pipeline).order_by("order").first()
+        first_stage = (
+            Stage.objects.filter(pipeline=target_pipeline).order_by("order").first()
+        )
 
         # Don't inherit assigned_user from source — the target pipeline
         # has different user groups. Auto-assignment will handle it if
@@ -559,7 +633,9 @@ class CRMViewSet(viewsets.ModelViewSet):
             contact=new_crm.contact,
             crm=new_crm,
             activity_type="Pipeline Added",
-            description=f"Added to pipeline '{target_pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}' — Copied from '{source.pipeline.name}'" if source.pipeline else f"Added to pipeline '{target_pipeline.name}'",
+            description=f"Added to pipeline '{target_pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}' — Copied from '{source.pipeline.name}'"
+            if source.pipeline
+            else f"Added to pipeline '{target_pipeline.name}'",
             user=request.user,
             pipeline_name=target_pipeline.name,
         )
@@ -610,11 +686,15 @@ class CRMViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-            first_stage = Stage.objects.filter(pipeline=target_pipeline).order_by("order").first()
+            first_stage = (
+                Stage.objects.filter(pipeline=target_pipeline).order_by("order").first()
+            )
 
             # Pre-fetch source deals with their contacts
             source_deals = list(
-                CRM.objects.filter(id__in=deal_ids).select_related("contact", "pipeline")
+                CRM.objects.filter(id__in=deal_ids).select_related(
+                    "contact", "pipeline"
+                )
             )
 
             if not source_deals:
@@ -655,7 +735,8 @@ class CRMViewSet(viewsets.ModelViewSet):
                 )
                 for item in counts:
                     user_obj = next(
-                        (u for u in eligible_users if u.id == item["assigned_user"]), None
+                        (u for u in eligible_users if u.id == item["assigned_user"]),
+                        None,
                     )
                     if user_obj:
                         ll_loads[user_obj] = item["c"]
@@ -697,9 +778,14 @@ class CRMViewSet(viewsets.ModelViewSet):
             for crm_entry in saved_crms:
                 # Find matching source deal for better descriptions
                 source_deal = next(
-                    (d for d in source_deals if d.contact_id == crm_entry.contact_id), None
+                    (d for d in source_deals if d.contact_id == crm_entry.contact_id),
+                    None,
                 )
-                source_pipeline_name = source_deal.pipeline.name if source_deal and source_deal.pipeline else None
+                source_pipeline_name = (
+                    source_deal.pipeline.name
+                    if source_deal and source_deal.pipeline
+                    else None
+                )
 
                 description = f"Added to pipeline '{target_pipeline.name}' under stage '{first_stage.name if first_stage else 'Default'}'"
                 if source_pipeline_name:
@@ -725,19 +811,6 @@ class CRMViewSet(viewsets.ModelViewSet):
                             or crm_entry.assigned_user.email,
                             user=request.user,
                             pipeline_name=target_pipeline.name,
-                        )
-                    )
-
-                # Also log on source deal
-                if source_deal:
-                    log_entries.append(
-                        ContactLog(
-                            contact=source_deal.contact,
-                            crm=source_deal,
-                            activity_type="Pipeline Changed",
-                            description=f"Copied to pipeline '{target_pipeline.name}'",
-                            user=request.user,
-                            pipeline_name=source_deal.pipeline.name if source_deal.pipeline else None,
                         )
                     )
 
@@ -770,6 +843,7 @@ class CRMViewSet(viewsets.ModelViewSet):
         batch_name = None
         if batch_id:
             from contacts.models import ImportBatch
+
             try:
                 batch = ImportBatch.objects.get(id=batch_id)
                 batch_name = batch.name
@@ -959,6 +1033,10 @@ class CRMViewSet(viewsets.ModelViewSet):
         pipeline_id = request.data.get("pipeline_id")
         contact_ids = request.data.get("contact_ids", [])
         source_pipeline = request.data.get("source_pipeline")
+        priority = request.data.get("priority", "High")
+        skip_contact_status_update = request.data.get(
+            "skip_contact_status_update", False
+        )
 
         if not pipeline_id or not contact_ids:
             return Response(
@@ -997,10 +1075,16 @@ class CRMViewSet(viewsets.ModelViewSet):
                 # the move) can then assign them properly.
                 moved_count = CRM.objects.filter(
                     pipeline_id=source_pipeline, contact_id__in=contact_ids
-                ).update(pipeline_id=pipeline_id, stage=first_stage, priority="High", assigned_user=None)
+                ).update(
+                    pipeline_id=pipeline_id,
+                    stage=first_stage,
+                    priority=priority,
+                    assigned_user=None,
+                )
 
-                # Update contact statuses to Retarget
-                Contact.objects.filter(id__in=contact_ids).update(status="Retarget")
+                # Update contact statuses to Retarget (unless skipped for plain move)
+                if not skip_contact_status_update:
+                    Contact.objects.filter(id__in=contact_ids).update(status="Retarget")
 
                 # Activity logs
                 from contacts.models import ContactLog
@@ -1025,9 +1109,10 @@ class CRMViewSet(viewsets.ModelViewSet):
                 print(
                     f"[TIMING] source_pipeline branch: {time.time() - _t0:.3f}s | queries={len(connection.queries) - _q0} | contacts={len(contact_ids)}"
                 )
+                action_label = "moved" if skip_contact_status_update else "retargeted"
                 return Response(
                     {
-                        "message": f"Successfully moved {moved_count} deals to retarget pipeline.",
+                        "message": f"Successfully {action_label} {moved_count} deals to pipeline.",
                         "moved_count": moved_count,
                     }
                 )
@@ -1227,7 +1312,9 @@ class CRMViewSet(viewsets.ModelViewSet):
 
             # Pre-fetch deals with contacts and pipelines for activity logging
             deals_to_delete = list(
-                CRM.objects.filter(id__in=deal_ids).select_related("contact", "pipeline")
+                CRM.objects.filter(id__in=deal_ids).select_related(
+                    "contact", "pipeline"
+                )
             )
 
             if not deals_to_delete:
@@ -1243,7 +1330,9 @@ class CRMViewSet(viewsets.ModelViewSet):
                         contact=crm.contact,
                         crm=None,
                         activity_type="Deal Deleted",
-                        description=f"Deal removed from pipeline '{crm.pipeline.name}'" if crm.pipeline else "Deal deleted",
+                        description=f"Deal removed from pipeline '{crm.pipeline.name}'"
+                        if crm.pipeline
+                        else "Deal deleted",
                         user=request.user,
                         pipeline_name=crm.pipeline.name if crm.pipeline else None,
                     )
@@ -1294,13 +1383,19 @@ class CRMViewSet(viewsets.ModelViewSet):
             # Determine target stage
             target_stage = None
             if stage_id:
-                target_stage = Stage.objects.filter(id=stage_id, pipeline=pipeline).first()
+                target_stage = Stage.objects.filter(
+                    id=stage_id, pipeline=pipeline
+                ).first()
             if not target_stage:
-                target_stage = Stage.objects.filter(pipeline=pipeline).order_by("order").first()
+                target_stage = (
+                    Stage.objects.filter(pipeline=pipeline).order_by("order").first()
+                )
 
             # Pre-fetch CRM records with existing contacts & pipeline names for activity logging
             deals_to_move = list(
-                CRM.objects.filter(id__in=deal_ids).select_related("contact", "pipeline")
+                CRM.objects.filter(id__in=deal_ids).select_related(
+                    "contact", "pipeline"
+                )
             )
 
             if not deals_to_move:
@@ -1316,7 +1411,7 @@ class CRMViewSet(viewsets.ModelViewSet):
                 assigned_user=None,
             )
 
-            # Create ContactLog entries in bulk (both target pipeline & source pipeline)
+            # Create ContactLog entry with full context
             from contacts.models import ContactLog
 
             log_entries = []
@@ -1325,30 +1420,20 @@ class CRMViewSet(viewsets.ModelViewSet):
                 new_pipeline_name = pipeline.name
                 stage_name = target_stage.name if target_stage else "Default"
 
-                # Log for target pipeline
+                description = f"Moved to pipeline '{new_pipeline_name}' under stage '{stage_name}'"
+                if old_pipeline_name and old_pipeline_name != new_pipeline_name:
+                    description = f"Moved from pipeline '{old_pipeline_name}' to '{new_pipeline_name}' under stage '{stage_name}'"
+
                 log_entries.append(
                     ContactLog(
                         contact=crm.contact,
                         crm=crm,
                         activity_type="Pipeline Changed",
-                        description=f"Moved to pipeline '{new_pipeline_name}' under stage '{stage_name}'",
+                        description=description,
                         user=request.user,
                         pipeline_name=new_pipeline_name,
                     )
                 )
-
-                # Log for source pipeline if different
-                if old_pipeline_name and old_pipeline_name != new_pipeline_name:
-                    log_entries.append(
-                        ContactLog(
-                            contact=crm.contact,
-                            crm=crm,
-                            activity_type="Pipeline Changed",
-                            description=f"Moved from pipeline '{old_pipeline_name}' to '{new_pipeline_name}' under stage '{stage_name}'",
-                            user=request.user,
-                            pipeline_name=old_pipeline_name,
-                        )
-                    )
 
             ContactLog.objects.bulk_create(log_entries, batch_size=1000)
 

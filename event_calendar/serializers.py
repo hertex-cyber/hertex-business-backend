@@ -43,6 +43,7 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
             "end",
             "contact",
             "pipeline",
+            "crm",
             "pipeline_name",
             "location",
             "status",
@@ -115,6 +116,32 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                     {"status": f"Invalid status '{status}' for tasks."}
                 )
 
+            request = self.context.get("request")
+            if self.instance is not None and status and request:
+                is_creator = self.instance.user == request.user
+                if not is_creator and status in ("approved", "canceled"):
+                    raise serializers.ValidationError(
+                        {"status": "Only the creator can set this status."}
+                    )
+                if status == "completed" and not (
+                    (data.get("completion_remarks") or "").strip()
+                ):
+                    raise serializers.ValidationError(
+                        {
+                            "completion_remarks": "Completion remarks are required when completing a task."
+                        }
+                    )
+                if (
+                    status == "on_hold"
+                    and not is_creator
+                    and not (data.get("hold_reason") or "").strip()
+                ):
+                    raise serializers.ValidationError(
+                        {
+                            "hold_reason": "Hold reason is required when putting a task on hold."
+                        }
+                    )
+
         elif todo_type == "event":
             if not data.get("description"):
                 raise serializers.ValidationError(
@@ -136,12 +163,83 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"start": "Follow-up date is required."}
                 )
+            if self.instance is None:
+                if not data.get("pipeline"):
+                    raise serializers.ValidationError(
+                        {"pipeline": "Pipeline is required for follow-ups."}
+                    )
+                if not data.get("assigned_to"):
+                    raise serializers.ValidationError(
+                        {"assigned_to": "Assigned user is required for follow-ups."}
+                    )
+                if not data.get("contact"):
+                    raise serializers.ValidationError(
+                        {"contact": "Contact is required for follow-ups."}
+                    )
+            else:
+                if "pipeline" in data and not data.get("pipeline"):
+                    raise serializers.ValidationError(
+                        {"pipeline": "Pipeline cannot be cleared."}
+                    )
+                if "assigned_to" in data and not data.get("assigned_to"):
+                    raise serializers.ValidationError(
+                        {"assigned_to": "Assigned user cannot be cleared."}
+                    )
+                if "contact" in data and not data.get("contact"):
+                    raise serializers.ValidationError(
+                        {"contact": "Contact cannot be cleared."}
+                    )
+                if "crm" in data and not data.get("crm"):
+                    raise serializers.ValidationError(
+                        {"crm": "CRM deal cannot be cleared."}
+                    )
             status = data.get("status")
             valid_statuses = [s[0] for s in CalendarTodo.FOLLOWUP_STATUS_CHOICES]
             if status and status not in valid_statuses:
                 raise serializers.ValidationError(
                     {"status": f"Invalid status '{status}' for follow-ups."}
                 )
+
+            request = self.context.get("request")
+            if self.instance is not None and status and request:
+                is_creator = self.instance.user == request.user
+                if not is_creator:
+                    now = timezone.now()
+                    is_failed = self.instance.status == "failed" or (
+                        self.instance.start
+                        and self.instance.start < now
+                        and self.instance.status == "follow_up"
+                    )
+                    if is_failed and status != "failed":
+                        raise serializers.ValidationError(
+                            {
+                                "status": "Only the creator can change the status of a failed follow-up."
+                            }
+                        )
+                    if status == "cancelled" and not (
+                        (data.get("followup_cancellation") or "").strip()
+                    ):
+                        raise serializers.ValidationError(
+                            {
+                                "followup_cancellation": "Cancellation reason is required when cancelling a follow-up."
+                            }
+                        )
+                    if status == "complete" and not (
+                        (data.get("completion_remarks") or "").strip()
+                    ):
+                        raise serializers.ValidationError(
+                            {
+                                "completion_remarks": "Completion remarks are required when completing a follow-up."
+                            }
+                        )
+                    if status == "failed" and not (
+                        (data.get("followup_failed") or "").strip()
+                    ):
+                        raise serializers.ValidationError(
+                            {
+                                "followup_failed": "Failed reason is required when marking a follow-up failed."
+                            }
+                        )
 
         elif todo_type == "meeting":
             if start_missing or (self.instance is None and not data.get("start")):
@@ -195,6 +293,30 @@ class CalendarTodoSerializer(serializers.ModelSerializer):
         return todo
 
     def update(self, instance, validated_data):
+        request = self.context.get("request")
+        if request and instance.todo_type == "task" and instance.user != request.user:
+            allowed_fields = {
+                "status",
+                "hold_reason",
+                "extension_request",
+                "completion_remarks",
+            }
+            for field in set(validated_data) - allowed_fields:
+                validated_data.pop(field)
+        elif (
+            request
+            and instance.todo_type == "followup"
+            and instance.user != request.user
+        ):
+            allowed_fields = {
+                "status",
+                "followup_cancellation",
+                "followup_failed",
+                "completion_remarks",
+            }
+            for field in set(validated_data) - allowed_fields:
+                validated_data.pop(field)
+
         attendee_ids = validated_data.pop("attendee_ids", None)
 
         new_status = validated_data.get("status")
