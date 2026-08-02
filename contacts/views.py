@@ -281,16 +281,10 @@ class ContactLogViewSet(viewsets.ModelViewSet):
         contact_id = self.request.query_params.get("contact")
         crm_id = self.request.query_params.get("crm")
 
-        if crm_id and contact_id:
-            from django.db.models import Q
-
-            qs = qs.filter(
-                Q(crm_id=crm_id) | Q(contact_id=contact_id, crm_id__isnull=True)
-            )
+        if crm_id:
+            qs = qs.filter(crm_id=crm_id)
         elif contact_id:
             qs = qs.filter(contact_id=contact_id)
-        elif crm_id:
-            qs = qs.filter(crm_id=crm_id)
 
         return qs
 
@@ -310,16 +304,10 @@ class ContactRemarkViewSet(viewsets.ModelViewSet):
         contact_id = self.request.query_params.get("contact")
         crm_id = self.request.query_params.get("crm")
 
-        if crm_id and contact_id:
-            from django.db.models import Q
-
-            qs = qs.filter(
-                Q(crm_id=crm_id) | Q(contact_id=contact_id, crm_id__isnull=True)
-            )
+        if crm_id:
+            qs = qs.filter(crm_id=crm_id)
         elif contact_id:
             qs = qs.filter(contact_id=contact_id)
-        elif crm_id:
-            qs = qs.filter(crm_id=crm_id)
 
         return qs
 
