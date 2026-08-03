@@ -237,14 +237,42 @@ def update_user_profile(request):
 
 @api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated])
+def verify_password(request):
+    """
+    Verify current password without changing it
+    POST /api/auth/verify-password/
+    Request body: {
+        "password": "CurrentPass123!"
+    }
+    """
+    password = request.data.get('password')
+    if not password:
+        return Response({
+            "success": False,
+            "message": "Password is required"
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.user.check_password(password):
+        return Response({
+            "success": True,
+            "message": "Password verified"
+        }, status=status.HTTP_200_OK)
+
+    return Response({
+        "success": False,
+        "message": "Current password is incorrect"
+    }, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
 def change_password(request):
     """
     Change user password
     POST /api/auth/change-password/
     Request body: {
         "current_password": "CurrentPass123!",
-        "new_password": "NewPass123!",
-        "new_password_confirm": "NewPass123!"
+        "new_password": "NewPass123!"
     }
     """
     serializer = PasswordChangeSerializer(data=request.data)

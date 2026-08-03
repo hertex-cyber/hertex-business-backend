@@ -32,6 +32,7 @@ urlpatterns = [
     path("profile/", views.get_user_profile, name="profile"),
     path("profile/update/", views.update_user_profile, name="profile-update"),
     path("change-password/", views.change_password, name="change-password"),
+    path("verify-password/", views.verify_password, name="verify-password"),
     # JWT Token Auth (for mobile and advanced clients)
     path("token/", views.CustomTokenObtainPairView.as_view(), name="token-obtain-pair"),
     path(
