@@ -87,6 +87,7 @@ class ProjectSerializer(serializers.ModelSerializer):
     workflows = WorkflowSerializer(many=True, read_only=True)
     workspace_details = WorkspaceSerializer(source='workspace', read_only=True)
     parent_project_details = serializers.SerializerMethodField()
+    work_item_summary = serializers.SerializerMethodField()
     workflow_preset = serializers.ChoiceField(
         choices=['scrum', 'kanban', 'sales_pipeline', 'support_ticket', 'ops_approval'],
         write_only=True, required=False,
@@ -104,6 +105,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'sync_department_members',
             'members', 'workflows',
             'workflow_preset',
+            'work_item_summary',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -116,6 +118,15 @@ class ProjectSerializer(serializers.ModelSerializer):
                 'key': obj.parent_project.key,
             }
         return None
+
+    def get_work_item_summary(self, obj):
+        items = obj.work_items.all()
+        return {
+            'total': items.count(),
+            'todo': items.filter(status__category='todo').count(),
+            'in_progress': items.filter(status__category='in_progress').count(),
+            'done': items.filter(status__category='done').count(),
+        }
 
     def create(self, validated_data):
         validated_data.pop('workflow_preset', None)
@@ -149,9 +160,11 @@ class ProjectListSerializer(serializers.ModelSerializer):
         return None
 
     def get_member_count(self, obj):
-        return obj.members.count()
+        return getattr(obj, 'member_count_annotated', None) or obj.members.count()
 
     def get_work_item_summary(self, obj):
+        if hasattr(obj, 'work_item_summary_annotated') and obj.work_item_summary_annotated:
+            return obj.work_item_summary_annotated
         items = obj.work_items.all()
         return {
             'total': items.count(),
@@ -246,9 +259,15 @@ class WorkItemSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'key', 'created_at', 'updated_at']
 
     def get_subtask_count(self, obj):
+        annotated = getattr(obj, 'subtask_count', None)
+        if annotated is not None:
+            return annotated
         return obj.subtasks.count()
 
     def get_comment_count(self, obj):
+        annotated = getattr(obj, 'comment_count', None)
+        if annotated is not None:
+            return annotated
         return obj.comments.count()
 
     def get_epic_details(self, obj):

@@ -10,6 +10,11 @@ from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
+import django_filters as filters_filter
+
+class CharInFilter(filters_filter.BaseInFilter, filters_filter.CharFilter):
+    pass
+
 
 from project_management.models import (
     Workspace, Project, ProjectMember, Workflow,
@@ -146,22 +151,29 @@ class ProjectViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def board(self, request, pk=None):
         """Get work items organized by status for Kanban board view."""
-        project = self.get_object()
+        project = Project.objects.filter(id=pk, is_active=True).first() or self.get_object()
         sprint_id = request.query_params.get('sprint')
-        statuses = WorkItemStatus.objects.filter(
-            workflow__projects=project
-        ).order_by('workflow', 'order')
+        statuses = self._project_statuses(project)
 
         items_qs = WorkItem.objects.filter(project=project)
         if sprint_id:
             items_qs = items_qs.filter(sprint_id=sprint_id)
 
+        items_qs = items_qs.select_related(
+            'assignee', 'reporter', 'epic', 'sprint', 'status'
+        ).annotate(
+            subtask_count=models.Count('subtasks', distinct=True),
+            comment_count=models.Count('comments', distinct=True),
+        ).order_by('order')
+
+        grouped_items = {}
+        all_items = list(items_qs)
+        for item in all_items:
+            grouped_items.setdefault(str(item.status_id), []).append(item)
+
         columns = []
         for status_obj in statuses:
-            items = items_qs.filter(status=status_obj).select_related(
-                'assignee', 'reporter', 'epic', 'sprint'
-            ).order_by('order')
-
+            column_items = grouped_items.get(str(status_obj.id), [])
             columns.append({
                 'id': str(status_obj.id),
                 'name': status_obj.name,
@@ -169,9 +181,18 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 'color': status_obj.color,
                 'category': status_obj.category,
                 'order': status_obj.order,
-                'items': WorkItemSerializer(items, many=True).data,
-                'item_count': items.count(),
+                'items': WorkItemSerializer(column_items, many=True).data,
+                'item_count': len(column_items),
             })
+
+        # Cache counts so ProjectListSerializer doesn't re-query them.
+        project.member_count_annotated = project.members.count()
+        project.work_item_summary_annotated = {
+            'total': len(all_items),
+            'todo': sum(1 for i in all_items if i.status.category == 'todo'),
+            'in_progress': sum(1 for i in all_items if i.status.category == 'in_progress'),
+            'done': sum(1 for i in all_items if i.status.category == 'done'),
+        }
 
         return Response({
             'project': ProjectListSerializer(project).data,
@@ -180,6 +201,27 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 Sprint.objects.filter(project=project, status='ACTIVE'), many=True
             ).data,
         })
+
+    @staticmethod
+    def _project_statuses(project):
+        """Return the statuses to display for a project's board.
+
+        Uses statuses mapped to the project's workflows; if the project has no
+        workflow mapped yet (so the board would otherwise be empty), fall back
+        to the default dev-kanban workflow's statuses so columns always show.
+        """
+        statuses = list(WorkItemStatus.objects.filter(
+            workflow__projects=project
+        ).order_by('workflow', 'order'))
+        if not statuses:
+            default_wf = Workflow.objects.filter(
+                is_default=True, scope='dev_kanban'
+            ).order_by('id').first()
+            if default_wf:
+                statuses = list(WorkItemStatus.objects.filter(
+                    workflow=default_wf
+                ).order_by('order'))
+        return statuses
 
     @action(detail=True, methods=['get'])
     def backlog(self, request, pk=None):
@@ -764,6 +806,41 @@ class WorkflowViewSet(viewsets.ModelViewSet):
 # WORK ITEM VIEWSET
 # ============================================================================
 
+class WorkItemFilterSet(filters_filter.FilterSet):
+    """Explicit filterset so status fields (e.g. status__category, __isnull)
+    work instead of returning 400 Bad Request."""
+    project = filters_filter.UUIDFilter(field_name='project_id')
+    epic = filters_filter.UUIDFilter(field_name='epic_id')
+    parent = filters_filter.UUIDFilter(field_name='parent_id')
+    sprint = filters_filter.UUIDFilter(field_name='sprint_id')
+    assignee = filters_filter.UUIDFilter(field_name='assignee_id')
+    status = filters_filter.UUIDFilter(field_name='status_id')
+    status__category = filters_filter.CharFilter(field_name='status__category')
+    status__category__in = CharInFilter(field_name='status__category', lookup_expr='in')
+    sprint__isnull = filters_filter.BooleanFilter(method='filter_isnull')
+    epic__isnull = filters_filter.BooleanFilter(method='filter_isnull')
+    parent__isnull = filters_filter.BooleanFilter(method='filter_isnull')
+
+    def filter_isnull(self, queryset, name, value):
+        field_name = name.replace('__isnull', '')
+        if value is not None:
+            return queryset.filter(**{f'{field_name}__isnull': value})
+        return queryset
+    issue_type = filters_filter.CharFilter(field_name='issue_type')
+    priority = filters_filter.CharFilter(field_name='priority')
+    due_date__gte = filters_filter.DateTimeFilter(field_name='due_date', lookup_expr='gte')
+    due_date__lte = filters_filter.DateTimeFilter(field_name='due_date', lookup_expr='lte')
+    story_points__gte = filters_filter.NumberFilter(field_name='story_points', lookup_expr='gte')
+    story_points__lte = filters_filter.NumberFilter(field_name='story_points', lookup_expr='lte')
+
+    class Meta:
+        model = WorkItem
+        fields = [
+            'project', 'status', 'assignee', 'issue_type', 'priority',
+            'parent', 'epic', 'sprint',
+        ]
+
+
 class WorkItemViewSet(viewsets.ModelViewSet):
     queryset = WorkItem.objects.all().select_related(
         'project', 'status', 'assignee', 'reporter', 'epic', 'sprint'
@@ -771,20 +848,12 @@ class WorkItemViewSet(viewsets.ModelViewSet):
         'subtasks', 'comments', 'watchers',
         'outgoing_links', 'incoming_links',
         'activity_logs'
+    ).annotate(
+        subtask_count=models.Count('subtasks', distinct=True),
+        comment_count=models.Count('comments', distinct=True),
     )
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = {
-        'project': ['exact'],
-        'status': ['exact'],
-        'assignee': ['exact'],
-        'issue_type': ['exact'],
-        'priority': ['exact'],
-        'parent': ['exact', 'isnull'],
-        'epic': ['exact', 'isnull'],
-        'sprint': ['exact', 'isnull'],
-        'due_date': ['exact', 'gte', 'lte'],
-        'story_points': ['exact', 'gte', 'lte'],
-    }
+    filterset_class = WorkItemFilterSet
     search_fields = ['title', 'description', 'key']
 
     def list(self, request, *args, **kwargs):
@@ -832,14 +901,39 @@ class WorkItemViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         data = request.data.copy() if hasattr(request.data, 'copy') else {**request.data}
         if not data.get('status'):
+            from project_management.models import WorkItemStatus
             project_id = data.get('project')
+            first_status = None
             if project_id:
-                from project_management.models import WorkItemStatus
                 first_status = WorkItemStatus.objects.filter(
                     workflow__projects=project_id
-                ).order_by('order').first()
-                if first_status:
-                    data['status'] = str(first_status.id)
+                ).order_by(
+                    'order', 'is_start'
+                ).first()
+            if not first_status:
+                # Fall back to the default dev-kanban workflow's start status so
+                # created items land in a visible board column even for projects
+                # that have no workflow mapped yet.
+                default_wf = Workflow.objects.filter(
+                    is_default=True, scope='dev_kanban'
+                ).order_by('id').first()
+                if default_wf:
+                    first_status = (
+                        WorkItemStatus.objects.filter(
+                            workflow=default_wf, is_start=True
+                        ).order_by('order').first()
+                        or WorkItemStatus.objects.filter(
+                            workflow=default_wf
+                        ).order_by('order').first()
+                    )
+            if not first_status:
+                # Last resort: any start status in the system.
+                first_status = (
+                    WorkItemStatus.objects.filter(is_start=True).order_by('order').first()
+                    or WorkItemStatus.objects.order_by('order').first()
+                )
+            if first_status:
+                data['status'] = str(first_status.id)
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
@@ -933,7 +1027,7 @@ class WorkItemViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def transition(self, request, pk=None):
-        work_item = self.get_object()
+        work_item = WorkItem.objects.select_related('status__workflow').get(id=pk)
         status_id = request.data.get('status')
 
         if not status_id:
@@ -981,7 +1075,11 @@ class WorkItemViewSet(viewsets.ModelViewSet):
             description=f"Status changed from '{old_status.name}' to '{new_status.name}'",
             metadata={'old_status': str(old_status.id), 'new_status': str(new_status.id)}
         )
-        return Response(WorkItemDetailSerializer(work_item).data)
+        return Response({
+            'id': str(work_item.id),
+            'status': str(work_item.status_id),
+            'status_name': new_status.name,
+        })
 
     @action(detail=True, methods=['post'])
     def convert_to_task(self, request, pk=None):
