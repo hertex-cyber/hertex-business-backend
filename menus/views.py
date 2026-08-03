@@ -129,6 +129,21 @@ class MenuViewSet(viewsets.ModelViewSet):
             'data': response_data
         })
 
+    def _auto_granted_system_menu_ids(self):
+        """
+        SYSTEM menus are always visible to Superadmin/Admin by default.
+        This is a hard auto-grant: even menus created later (e.g. from the
+        platform-management app) are immediately visible to admin roles
+        without requiring an explicit MenuRole row.
+        """
+        return set(
+            Menu.objects.filter(
+                type='SYSTEM',
+                organization__isnull=True,
+                is_active=True,
+            ).values_list('id', flat=True)
+        )
+
     def _get_visible_menus(self, user, purchased_products):
         """
         Core menu resolution logic - optimized with prefetch_related to avoid N+1
@@ -148,8 +163,14 @@ class MenuViewSet(viewsets.ModelViewSet):
             MenuUser.objects.filter(user=user).values_list('menu_id', flat=True)
         )
 
-        # Combine both sets
-        all_menu_ids = role_menu_ids | user_menu_ids
+        # SYSTEM menus are always visible to Superadmin/Admin (hard auto-grant)
+        auto_granted_ids = (
+            self._auto_granted_system_menu_ids()
+            if user.role in ('Superadmin', 'Admin') else set()
+        )
+
+        # Combine all sets
+        all_menu_ids = role_menu_ids | user_menu_ids | auto_granted_ids
 
         query = Q(id__in=all_menu_ids, is_active=True)
         query &= (
@@ -539,6 +560,12 @@ class MenuViewSet(viewsets.ModelViewSet):
         role_menu_ids = set(
             MenuRole.objects.filter(menu_role_filter).values_list('menu_id', flat=True)
         )
+
+        # SYSTEM menus are auto-granted to Superadmin/Admin — mark them as
+        # role_based (locked) in the user-management modal so they cannot be
+        # removed from an admin user.
+        if target_user.role in ('Superadmin', 'Admin'):
+            role_menu_ids |= self._auto_granted_system_menu_ids()
 
         # ── Directly assigned menu IDs ───────────────────────────────────────
         direct_menu_ids = set(
