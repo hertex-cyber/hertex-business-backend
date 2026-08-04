@@ -2267,6 +2267,436 @@ class DashboardViewSet(viewsets.ViewSet):
         })
 
     # ═══════════════════════════════════════════════════════════════════
+    # Phase 4: Organization-wide Business Owner Dashboard
+    # ═══════════════════════════════════════════════════════════════════
+
+    @action(detail=False, methods=['get'])
+    def owner(self, request):
+        """Single cross-module rollup for the business owner — the whole
+        organization at a glance: people, CRM, finance, sales, projects,
+        inventory, calendar and a merged recent-activity feed."""
+        from django.db.models.functions import TruncMonth
+
+        User = get_user_model()
+        now = timezone.now()
+
+        # ── Combined single-round-trip rollup ───────────────────────────
+        # The owner dashboard aggregates many counters across modules.
+        # Neon's pooled connection adds ~0.5s of latency per query, so
+        # issuing ~50 separate count/aggregate queries here made the whole
+        # endpoint take >20s and time out (HTTP 500). All scalar rollups
+        # below are fetched in a single query instead.
+        from django.db import connection as db_connection
+
+        agg_parts = []   # list of (key, sql)
+        agg_params = []  # positional params, in the same order as parts
+
+        def _add(key, sql, params=()):
+            agg_parts.append((key, f"SELECT {sql}"))
+            agg_params.extend(params)
+
+        user_tbl = User._meta.db_table
+        _add('user_total', f"COUNT(*) FROM {user_tbl}")
+        _add('user_active', f"COUNT(*) FROM {user_tbl} WHERE is_active")
+
+        try:
+            from authentication.models import Department
+            _add('dept_count', f"COUNT(*) FROM {Department._meta.db_table}")
+        except ImportError:
+            pass
+
+        try:
+            from hr.models import (
+                Employee, LeaveApplication, Attendance, Payroll,
+            )
+            emp_tbl = Employee._meta.db_table
+            _add('emp_total', f"COUNT(*) FROM {emp_tbl}")
+            _add('emp_active', f"COUNT(*) FROM {emp_tbl} WHERE is_active")
+            _add('emp_onboarding', f"COUNT(*) FROM {emp_tbl} WHERE status = 'ONBOARDING'")
+            _add('emp_notice', f"COUNT(*) FROM {emp_tbl} WHERE status = 'NOTICE_PERIOD'")
+            _add('leave_pending', f"COUNT(*) FROM {LeaveApplication._meta.db_table} WHERE approval_status = 'PENDING'")
+            today = now.date()
+            _add('attendance_today', f"COUNT(*) FROM {Attendance._meta.db_table} WHERE date = %s AND status = 'PRESENT'", [today])
+            _add('payroll_total', f"COALESCE(SUM(gross_salary), 0) FROM {Payroll._meta.db_table} WHERE status <> 'DRAFT'")
+        except ImportError:
+            pass
+
+        try:
+            from contacts.models import Contact
+            c_tbl = Contact._meta.db_table
+            _add('contact_total', f"COUNT(*) FROM {c_tbl}")
+            _add('contact_new', f"COUNT(*) FROM {c_tbl} WHERE created_at >= %s", [now - timezone.timedelta(days=30)])
+        except ImportError:
+            pass
+
+        try:
+            from crm.models import CRM, Stage
+            crm_tbl = CRM._meta.db_table
+            stage_tbl = Stage._meta.db_table
+            _add('crm_deals', f"COUNT(*) FROM {crm_tbl}")
+            _add('crm_pipeline', f"COALESCE(SUM(value), 0) FROM {crm_tbl}")
+            _add('crm_won', f"COUNT(*) FROM {crm_tbl} c JOIN {stage_tbl} s ON c.stage_id = s.id WHERE s.slug IN ('won', 'closed_won')")
+            _add('crm_won_value', f"COALESCE(SUM(c.value), 0) FROM {crm_tbl} c JOIN {stage_tbl} s ON c.stage_id = s.id WHERE s.slug IN ('won', 'closed_won')")
+        except ImportError:
+            pass
+
+        try:
+            from invoices.models import Invoice
+            inv_tbl = Invoice._meta.db_table
+            _add('inv_total', f"COUNT(*) FROM {inv_tbl}")
+            _add('inv_invoiced', f"COALESCE(SUM(grand_total), 0) FROM {inv_tbl} WHERE status = 'completed'")
+        except ImportError:
+            pass
+
+        try:
+            from payments.models import Payment
+            _add('pay_total', f"COALESCE(SUM(amount), 0) FROM {Payment._meta.db_table}")
+        except ImportError:
+            pass
+
+        if SALES_TASK_MANAGER_AVAILABLE:
+            try:
+                from sales_task_manager.models import SalesTarget, TargetCycle
+                cyc_tbl = TargetCycle._meta.db_table
+                tgt_tbl = SalesTarget._meta.db_table
+                _add('cycle_count', f"COUNT(*) FROM {cyc_tbl} WHERE status = 'ACTIVE'")
+                _add('t_target', f"COALESCE(SUM(t.target_amount), 0) FROM {tgt_tbl} t JOIN {cyc_tbl} c ON t.cycle_id = c.id WHERE c.status = 'ACTIVE'")
+                _add('t_achieved', f"COALESCE(SUM(t.achieved_amount), 0) FROM {tgt_tbl} t JOIN {cyc_tbl} c ON t.cycle_id = c.id WHERE c.status = 'ACTIVE'")
+            except ImportError:
+                pass
+
+        proj_tbl = Project._meta.db_table
+        item_tbl = WorkItem._meta.db_table
+        stat_tbl = WorkItemStatus._meta.db_table
+        _add('proj_total', f"COUNT(*) FROM {proj_tbl}")
+        _add('proj_active', f"COUNT(*) FROM {proj_tbl} WHERE is_active")
+        _add('item_total', f"COUNT(*) FROM {item_tbl}")
+        _add('item_todo', f"COUNT(*) FROM {item_tbl} i JOIN {stat_tbl} s ON i.status_id = s.id WHERE s.category = 'todo'")
+        _add('item_in_progress', f"COUNT(*) FROM {item_tbl} i JOIN {stat_tbl} s ON i.status_id = s.id WHERE s.category = 'in_progress'")
+        _add('item_done', f"COUNT(*) FROM {item_tbl} i JOIN {stat_tbl} s ON i.status_id = s.id WHERE s.category = 'done'")
+        _add('item_blocked', f"COUNT(*) FROM {item_tbl} i JOIN {stat_tbl} s ON i.status_id = s.id WHERE s.category = 'blocked'")
+        _add('item_overdue', f"COUNT(*) FROM {item_tbl} i JOIN {stat_tbl} s ON i.status_id = s.id WHERE i.due_date < %s AND s.category IN ('todo', 'in_progress')", [now])
+        _add('item_unassigned', f"COUNT(*) FROM {item_tbl} WHERE assignee_id IS NULL")
+
+        try:
+            from inventory.models import InventoryItem
+            invitem_tbl = InventoryItem._meta.db_table
+            _add('invitem_total', f"COUNT(*) FROM {invitem_tbl}")
+            _add('invitem_active', f"COUNT(*) FROM {invitem_tbl} WHERE status = 'ACTIVE'")
+        except ImportError:
+            pass
+
+        try:
+            from event_calendar.models import CalendarTodo
+            _add('cal_overdue', f"COUNT(*) FROM {CalendarTodo._meta.db_table} WHERE \"end\" < %s AND status IS NULL", [now])
+        except ImportError:
+            pass
+
+        with db_connection.cursor() as cur:
+            select_sql = "SELECT " + ", ".join(
+                f"({sql}) AS {key}" for key, sql in agg_parts
+            )
+            cur.execute(select_sql, agg_params)
+            row = cur.fetchone()
+        rollup = {key: row[i] for i, (key, _) in enumerate(agg_parts)}
+
+        # ── People & HR ────────────────────────────────────────────────
+        total_users = rollup.get('user_total', 0)
+        active_users = rollup.get('user_active', 0)
+
+        people = {
+            'total_users': total_users,
+            'active_users': active_users,
+            'departments': rollup.get('dept_count', 0),
+        }
+        hr = {}
+        if 'emp_total' in rollup:
+            hr['employees_total'] = rollup['emp_total']
+            hr['employees_active'] = rollup['emp_active']
+            hr['employees_onboarding'] = rollup['emp_onboarding']
+            hr['employees_notice'] = rollup['emp_notice']
+            hr['leave_pending'] = rollup['leave_pending']
+            hr['attendance_today'] = rollup['attendance_today']
+            hr['payroll_total'] = float(rollup['payroll_total'])
+        people['hr'] = hr
+
+        # ── Contacts ───────────────────────────────────────────────────
+        contacts = {'total': 0, 'by_status': [], 'new_30_days': 0}
+        if 'contact_total' in rollup:
+            from contacts.models import Contact
+            cq = Contact.objects.all()
+            contacts['total'] = rollup['contact_total']
+            contacts['new_30_days'] = rollup['contact_new']
+            contacts['by_status'] = list(cq.values('status').annotate(
+                count=Count('id')
+            ).order_by('-count'))
+
+        # ── CRM ────────────────────────────────────────────────────────
+        crm = {
+            'deals': 0, 'pipeline_value': 0, 'won_deals': 0,
+            'won_value': 0, 'stages': [],
+        }
+        if 'crm_deals' in rollup:
+            from crm.models import CRM, Stage
+            deals = CRM.objects.select_related('stage')
+            crm['deals'] = rollup['crm_deals']
+            crm['pipeline_value'] = float(rollup['crm_pipeline'])
+            crm['won_deals'] = rollup['crm_won']
+            crm['won_value'] = float(rollup['crm_won_value'])
+            stage_rows = deals.values(
+                'stage__name', 'stage__slug', 'stage__color'
+            ).annotate(
+                count=Count('id'),
+                value=Sum('value'),
+            ).order_by('-value')
+            crm['stages'] = []
+            for row in stage_rows:
+                crm['stages'].append({
+                    'name': row['stage__name'],
+                    'slug': row['stage__slug'],
+                    'color': row['stage__color'],
+                    'count': row['count'],
+                    'value': float(row['value'] or 0),
+                })
+
+        # ── Finance: Invoices + Payments ───────────────────────────────
+        finance = {
+            'invoices_total': 0,
+            'invoices_by_status': [],
+            'invoiced_value': 0,
+            'paid_value': 0,
+            'outstanding': 0,
+            'revenue_by_month': [],
+            'recent_payments': [],
+        }
+        if 'inv_total' in rollup:
+            from invoices.models import Invoice
+            invs = Invoice.objects.all()
+            finance['invoices_total'] = rollup['inv_total']
+            finance['invoices_by_status'] = list(invs.values('status').annotate(
+                count=Count('id')
+            ).order_by('status'))
+            finance['invoiced_value'] = float(rollup['inv_invoiced'])
+        if 'pay_total' in rollup:
+            from payments.models import Payment
+            pay_qs = Payment.objects.all()
+            paid = float(rollup['pay_total'])
+            finance['paid_value'] = paid
+            finance['outstanding'] = max(
+                0, finance['invoiced_value'] - paid
+            )
+            monthly = pay_qs.annotate(
+                month=TruncMonth('created_at')
+            ).values('month').annotate(total=Sum('amount')).order_by('month')
+            by_month = {str(r['month'])[:7]: float(r['total'] or 0) for r in monthly}
+            labels = []
+            for i in range(5, -1, -1):
+                d = now - timezone.timedelta(days=30 * i)
+                labels.append(str(d.date())[:7])
+            finance['revenue_by_month'] = [
+                {'month': m, 'label': m, 'value': by_month.get(m, 0)}
+                for m in labels
+            ]
+            finance['recent_payments'] = [
+                {
+                    'id': str(p.id),
+                    'amount': float(p.amount),
+                    'payment_for': p.payment_for,
+                    'payment_method': p.payment_method,
+                    'time': p.created_at.isoformat(),
+                }
+                for p in pay_qs.order_by('-created_at')[:5]
+            ]
+
+        # ── Sales Targets ──────────────────────────────────────────────
+        sales = {
+            'target': 0, 'achieved': 0, 'attainment_pct': 0,
+            'active_cycles': 0, 'top_achievers': [],
+        }
+        if 'cycle_count' in rollup:
+            from sales_task_manager.models import SalesTarget, TargetCycle
+            cycles = TargetCycle.objects.filter(status='ACTIVE')
+            targets = SalesTarget.objects.filter(cycle__in=cycles)
+            t_val = float(rollup['t_target'])
+            a_val = float(rollup['t_achieved'])
+            sales = {
+                'target': t_val,
+                'achieved': a_val,
+                'attainment_pct': round(
+                    (a_val / t_val * 100) if t_val else 0, 1
+                ),
+                'active_cycles': rollup['cycle_count'],
+                'top_achievers': [
+                    {
+                        'name': f"{r['assigned_user__first_name'] or ''} {r['assigned_user__last_name'] or ''}".strip() or r['assigned_user__email'],
+                        'achieved': float(r['a'] or 0),
+                        'target': float(r['t'] or 0),
+                    }
+                    for r in targets.filter(
+                        assignee_type='USER', assigned_user__isnull=False
+                    ).values(
+                        'assigned_user__first_name',
+                        'assigned_user__last_name',
+                        'assigned_user__email',
+                    ).annotate(
+                        t=Sum('target_amount'), a=Sum('achieved_amount')
+                    ).order_by('-a')[:5]
+                ],
+            }
+
+        # ── Projects & Work ────────────────────────────────────────────
+        projects = Project.objects.all()
+        active_projects = rollup['proj_active']
+        items = WorkItem.objects.select_related('status')
+        item_stats = {
+            'total': rollup['item_total'],
+            'todo': rollup['item_todo'],
+            'in_progress': rollup['item_in_progress'],
+            'done': rollup['item_done'],
+            'blocked': rollup['item_blocked'],
+            'overdue': rollup['item_overdue'],
+            'unassigned': rollup['item_unassigned'],
+            'by_type': list(items.values('issue_type').annotate(
+                count=Count('id')
+            ).order_by('-count')),
+        }
+        completion_pct = round(
+            (item_stats['done'] / item_stats['total'] * 100)
+            if item_stats['total'] else 0, 1
+        )
+        project_data = {
+            'total': rollup['proj_total'],
+            'active': active_projects,
+            'work_items': item_stats,
+            'completion_pct': completion_pct,
+        }
+
+        # ── Inventory ──────────────────────────────────────────────────
+        inventory = {
+            'items': 0, 'active_items': 0, 'low_stock': 0,
+            'stock_valuation': 0,
+        }
+        if 'invitem_total' in rollup:
+            from inventory.models import InventoryItem, StockSummary
+            inv_items = InventoryItem.objects.all()
+            inventory['items'] = rollup['invitem_total']
+            inventory['active_items'] = rollup['invitem_active']
+            qty_rows = StockSummary.objects.values('item_id').annotate(
+                total=Sum('physical_quantity')
+            )
+            qty_by_item = {r['item_id']: float(r['total'] or 0) for r in qty_rows}
+            valuation = 0.0
+            low_stock = 0
+            for it in inv_items.filter(status='ACTIVE'):
+                qty = qty_by_item.get(it.id, 0)
+                if it.cost_price:
+                    valuation += qty * float(it.cost_price)
+                if it.min_stock_level is not None and qty < float(it.min_stock_level):
+                    low_stock += 1
+            inventory['low_stock'] = low_stock
+            inventory['stock_valuation'] = round(valuation, 2)
+
+        # ── Calendar ───────────────────────────────────────────────────
+        calendar = {'upcoming': [], 'overdue': 0}
+        if 'cal_overdue' in rollup:
+            from event_calendar.models import CalendarTodo
+            todos = CalendarTodo.objects.all()
+            upcoming = todos.filter(
+                end__gte=now
+            ).order_by('end')[:6]
+            calendar['upcoming'] = [
+                {
+                    'id': str(t.id),
+                    'title': t.title,
+                    'end_date': t.end.isoformat() if t.end else None,
+                }
+                for t in upcoming
+            ]
+            calendar['overdue'] = rollup['cal_overdue']
+
+        # ── Merged recent activity ─────────────────────────────────────
+        recent = []
+        try:
+            for it in WorkItem.objects.select_related('project', 'assignee', 'status') \
+                    .order_by('-created_at')[:6]:
+                recent.append({
+                    'type': 'work_item',
+                    'title': it.title,
+                    'meta': f"{it.project.key if it.project else ''} • {it.status.name if it.status else 'No status'}",
+                    'time': it.created_at.isoformat(),
+                })
+        except Exception:
+            pass
+        try:
+            from payments.models import Payment
+            pay_recent = Payment.objects.order_by('-created_at')[:6]
+            for p in pay_recent:
+                recent.append({
+                    'type': 'payment',
+                    'title': p.payment_for,
+                    'meta': f"₹{float(p.amount):,.2f} • {p.payment_method or 'Payment'}",
+                    'time': p.created_at.isoformat(),
+                })
+        except ImportError:
+            pass
+        try:
+            from contacts.models import Contact
+            for c in Contact.objects.order_by('-created_at')[:5]:
+                recent.append({
+                    'type': 'contact',
+                    'title': c.name or c.email or c.phone or 'Contact',
+                    'meta': c.status or 'Lead',
+                    'time': c.created_at.isoformat(),
+                })
+        except Exception:
+            pass
+        try:
+            from invoices.models import Invoice
+            for inv in Invoice.objects.order_by('-created_at')[:5]:
+                recent.append({
+                    'type': 'invoice',
+                    'title': inv.invoice_number or 'Invoice',
+                    'meta': f"{inv.client_name} • ₹{float(inv.grand_total or 0):,.2f}",
+                    'time': inv.created_at.isoformat(),
+                })
+        except ImportError:
+            pass
+        recent.sort(key=lambda x: x.get('time', ''), reverse=True)
+
+        # ── KPIs ───────────────────────────────────────────────────────
+        org_name = getattr(request.user, 'organization', None)
+        try:
+            org_name = request.user.organization.name if request.user.organization else None
+        except Exception:
+            org_name = None
+
+        kpis = {
+            'revenue_total': finance['paid_value'],
+            'pipeline_value': crm['pipeline_value'],
+            'sales_attainment_pct': sales['attainment_pct'],
+            'active_projects': active_projects,
+            'headcount': hr.get('employees_active', total_users),
+            'open_work_items': item_stats['in_progress'] + item_stats['todo'],
+            'invoices_total': finance['invoices_total'],
+            'low_stock': inventory['low_stock'],
+        }
+
+        return Response({
+            'generated_at': now.isoformat(),
+            'org': {'name': org_name},
+            'kpis': kpis,
+            'people': people,
+            'contacts': contacts,
+            'crm': crm,
+            'finance': finance,
+            'sales': sales,
+            'projects': project_data,
+            'inventory': inventory,
+            'calendar': calendar,
+            'recent_activity': recent[:12],
+        })
+
+    # ═══════════════════════════════════════════════════════════════════
     # Phase 3: Global Search
     # ═══════════════════════════════════════════════════════════════════
 
