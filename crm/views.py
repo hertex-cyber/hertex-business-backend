@@ -1452,3 +1452,54 @@ class CRMViewSet(viewsets.ModelViewSet):
             return Response(
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @action(detail=True, methods=["get"])
+    def activity(self, request, pk=None):
+        """Unified, server-side paginated activity feed for a deal.
+
+        Merges ContactLog entries and follow-up todos for the deal into a
+        single timeline ordered by created_at (newest first), then paginates
+        that merged stream so page boundaries match the rendered feed.
+        """
+        from django.db.models import Q
+        from contacts.models import ContactLog
+        from contacts.serializers import ContactLogSerializer
+        from event_calendar.models import CalendarTodo
+        from event_calendar.serializers import CalendarTodoSerializer
+        from core.pagination import CustomPageNumberPagination
+
+        deal = self.get_object()
+
+        logs = ContactLog.objects.filter(crm_id=deal.id).select_related("user", "crm")
+        todos = CalendarTodo.objects.filter(
+            crm_id=deal.id, todo_type="followup"
+        ).select_related("user", "assigned_to", "contact", "pipeline")
+
+        user = request.user
+        if user.role not in ("Superadmin", "Admin"):
+            todos = todos.filter(Q(assigned_to=user) | Q(user=user))
+
+        items = [
+            {"kind": "log", **entry}
+            for entry in ContactLogSerializer(
+                logs, many=True, context={"request": request}
+            ).data
+        ]
+        items += [
+            {"kind": "followup", **entry}
+            for entry in CalendarTodoSerializer(
+                todos, many=True, context={"request": request}
+            ).data
+        ]
+
+        kind = request.query_params.get("kind")
+        if kind == "log":
+            items = [i for i in items if i["kind"] == "log"]
+        elif kind == "followup":
+            items = [i for i in items if i["kind"] == "followup"]
+
+        items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+
+        paginator = CustomPageNumberPagination()
+        page = paginator.paginate_queryset(items, request, view=self)
+        return paginator.get_paginated_response(page)
