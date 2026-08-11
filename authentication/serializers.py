@@ -163,14 +163,6 @@ class PasswordChangeSerializer(serializers.Serializer):
 
     current_password = serializers.CharField(write_only=True, required=True)
     new_password = serializers.CharField(write_only=True, required=True, min_length=8)
-    new_password_confirm = serializers.CharField(
-        write_only=True, required=True, min_length=8
-    )
-
-    def validate(self, data):
-        if data["new_password"] != data["new_password_confirm"]:
-            raise serializers.ValidationError("New passwords do not match.")
-        return data
 
 
 class ProfileUpdateSerializer(serializers.ModelSerializer):

@@ -177,17 +177,15 @@ DEFAULT_MENUS = [
 # ─────────────────────────────────────────────────────────────────────────────
 # Role configuration
 # ─────────────────────────────────────────────────────────────────────────────
-ALL_ROLES = ["Superadmin", "Admin", "Manager", "Staff", "Vendor", "User"]
-MANAGER_PLUS_ROLES = ["Superadmin", "Admin", "Manager"]
+# SYSTEM menus are auto-granted to Superadmin/Admin in MenuViewSet.
+# All other roles (e.g. Staff) receive menu access via per-user assignment
+# from User Management (MenuUser), NOT via bulk role grants.
 ADMIN_ONLY_ROLES = ["Superadmin", "Admin"]
 
-# Per-menu role override: codes listed here get custom role lists
-# All other menus default to MANAGER_PLUS_ROLES
-MENU_ROLE_OVERRIDES = {
-    "dashboard": ALL_ROLES,       # Everyone needs the dashboard
-    "settings_pref": ALL_ROLES,   # Everyone needs settings
-    "admin": ADMIN_ONLY_ROLES,    # Only admins
-}
+# All system menus grant the admin roles. Per-menu overrides can be added here
+# if a specific menu should also appear for other roles.
+MENU_ROLE_OVERRIDES = {}
+
 
 
 class Command(BaseCommand):
@@ -244,7 +242,7 @@ class Command(BaseCommand):
 
         for menu_data in DEFAULT_MENUS:
             menu_code = menu_data["code"]
-            roles = MENU_ROLE_OVERRIDES.get(menu_code, MANAGER_PLUS_ROLES)
+            roles = MENU_ROLE_OVERRIDES.get(menu_code, ADMIN_ONLY_ROLES)
 
             defaults = {
                 "name": menu_data["name"],

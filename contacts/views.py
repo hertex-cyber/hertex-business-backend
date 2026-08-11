@@ -268,6 +268,64 @@ class ContactViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    @action(detail=True, methods=["get"])
+    def activity(self, request, pk=None):
+        """Unified, server-side paginated activity feed for a contact.
+
+        Merges ContactLog entries (across all of the contact's deals) and
+        follow-up todos for the contact into a single timeline ordered by
+        created_at (newest first), then paginates that merged stream so page
+        boundaries match the rendered feed.
+        """
+        from django.db.models import Q
+        from contacts.serializers import ContactLogSerializer
+        from event_calendar.models import CalendarTodo
+        from event_calendar.serializers import CalendarTodoSerializer
+        from core.pagination import CustomPageNumberPagination
+
+        contact = self.get_object()
+
+        logs = ContactLog.objects.filter(contact_id=contact.id).select_related(
+            "user", "crm", "crm__pipeline"
+        )
+        todos = CalendarTodo.objects.filter(
+            contact_id=contact.id, todo_type="followup"
+        ).select_related("user", "assigned_to", "contact", "pipeline")
+
+        date_filter = request.query_params.get("date")
+        if date_filter:
+            logs = logs.filter(created_at__date=date_filter)
+            todos = todos.filter(start__date=date_filter)
+
+        user = request.user
+        if user.role not in ("Superadmin", "Admin"):
+            todos = todos.filter(Q(assigned_to=user) | Q(user=user))
+
+        items = [
+            {"kind": "log", **entry}
+            for entry in ContactLogSerializer(
+                logs, many=True, context={"request": request}
+            ).data
+        ]
+        items += [
+            {"kind": "followup", **entry}
+            for entry in CalendarTodoSerializer(
+                todos, many=True, context={"request": request}
+            ).data
+        ]
+
+        kind = request.query_params.get("kind")
+        if kind == "log":
+            items = [i for i in items if i["kind"] == "log"]
+        elif kind == "followup":
+            items = [i for i in items if i["kind"] == "followup"]
+
+        items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+
+        paginator = CustomPageNumberPagination()
+        page = paginator.paginate_queryset(items, request, view=self)
+        return paginator.get_paginated_response(page)
+
 
 class ContactLogViewSet(viewsets.ModelViewSet):
     queryset = ContactLog.objects.all().select_related(
