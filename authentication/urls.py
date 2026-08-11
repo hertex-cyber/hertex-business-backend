@@ -13,7 +13,7 @@ from .usermanagement_views import (
 app_name = "authentication"
 
 # Create router for viewsets
-router = DefaultRouter(trailing_slash=False)
+router = DefaultRouter()
 router.register(r"users", UserViewSet, basename="user")
 router.register(r"activities", AuditLogViewSet, basename="activity")
 router.register(r"departments", DepartmentViewSet, basename="department")
