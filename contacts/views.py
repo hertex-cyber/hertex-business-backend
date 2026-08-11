@@ -292,6 +292,11 @@ class ContactViewSet(viewsets.ModelViewSet):
             contact_id=contact.id, todo_type="followup"
         ).select_related("user", "assigned_to", "contact", "pipeline")
 
+        date_filter = request.query_params.get("date")
+        if date_filter:
+            logs = logs.filter(created_at__date=date_filter)
+            todos = todos.filter(start__date=date_filter)
+
         user = request.user
         if user.role not in ("Superadmin", "Admin"):
             todos = todos.filter(Q(assigned_to=user) | Q(user=user))
