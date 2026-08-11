@@ -107,6 +107,13 @@ class PipelineViewSet(viewsets.ModelViewSet):
         pipeline = self.get_object()
         strategy = request.data.get("strategy", pipeline.assignment_type)
 
+        if pipeline.assignment_type != strategy:
+            pipeline.assignment_type = strategy
+            pipeline.save(update_fields=["assignment_type"])
+            if strategy != "single_user" and pipeline.assigned_user:
+                pipeline.assigned_user = None
+                pipeline.save(update_fields=["assigned_user"])
+
         unassigned = CRM.objects.filter(pipeline=pipeline, assigned_user__isnull=True)
         unassigned_count = unassigned.count()
 
@@ -193,6 +200,9 @@ class PipelineViewSet(viewsets.ModelViewSet):
             for deal in unassigned_list:
                 deal.assigned_user = target_user
                 assigned_count += 1
+
+            pipeline.assigned_user = target_user
+            pipeline.save(update_fields=["assigned_user"])
 
         # Perform Bulk Update
         CRM.objects.bulk_update(unassigned_list, ["assigned_user"], batch_size=1000)
@@ -459,9 +469,7 @@ class CRMViewSet(viewsets.ModelViewSet):
             elif pipeline.assignment_type == "least_loaded":
                 assigned_user = self.assign_least_loaded(pipeline)
             elif pipeline.assignment_type == "single_user":
-                eligible = self.get_pipeline_users(pipeline)
-                if eligible.exists():
-                    assigned_user = self.assign_least_loaded(pipeline)
+                assigned_user = pipeline.assigned_user
 
         crm = serializer.save(assigned_user=assigned_user)
 
@@ -607,6 +615,8 @@ class CRMViewSet(viewsets.ModelViewSet):
             assigned_user = self.assign_round_robin(target_pipeline)
         elif target_pipeline.assignment_type == "least_loaded":
             assigned_user = self.assign_least_loaded(target_pipeline)
+        elif target_pipeline.assignment_type == "single_user":
+            assigned_user = target_pipeline.assigned_user
 
         # Create new CRM entry
         new_crm = CRM.objects.create(

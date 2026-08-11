@@ -30,6 +30,7 @@ class PipelineSerializer(serializers.ModelSerializer):
     stages = StageSerializer(many=True, read_only=True)
     departments = DepartmentSerializer(many=True, read_only=True)
     deals_count = serializers.SerializerMethodField()
+    assigned_user_details = UserBriefSerializer(source="assigned_user", read_only=True)
     department_ids = serializers.PrimaryKeyRelatedField(
         queryset=Department.objects.all(),
         source="departments",
@@ -54,6 +55,8 @@ class PipelineSerializer(serializers.ModelSerializer):
             "department_ids",
             "deals_count",
             "assignment_type",
+            "assigned_user",
+            "assigned_user_details",
             "pipeline_type",
             "mandatory_fields",
             "custom_fields_enabled",

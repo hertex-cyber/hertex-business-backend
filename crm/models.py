@@ -45,6 +45,13 @@ class Pipeline(Main):
     pipeline_type = models.CharField(
         max_length=20, choices=PIPELINE_TYPE_CHOICES, default="sales"
     )
+    assigned_user = models.ForeignKey(
+        "authentication.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="assigned_pipelines",
+    )
     mandatory_fields = models.JSONField(default=list, blank=True)
     custom_fields_enabled = models.BooleanField(default=False)
 
