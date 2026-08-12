@@ -1486,6 +1486,79 @@ class CRMViewSet(viewsets.ModelViewSet):
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    @action(detail=False, methods=["post"], url_path="bulk-move-to-stage")
+    def bulk_move_to_stage(self, request):
+        """Bulk move selected deals to a specific stage within the same pipeline."""
+        deal_ids = request.data.get("deal_ids", [])
+        stage_id = request.data.get("stage_id")
+
+        if not stage_id or not deal_ids:
+            return Response(
+                {"error": "stage_id and deal_ids list are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            target_stage = Stage.objects.get(id=stage_id)
+            pipeline = target_stage.pipeline
+
+            if (
+                request.user.role == "Staff"
+                and not pipeline.departments.filter(
+                    id__in=request.user.departments.all()
+                ).exists()
+            ):
+                return Response(
+                    {"error": "You do not have access to this pipeline."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            deals_to_move = list(
+                CRM.objects.filter(id__in=deal_ids)
+                .select_related("contact", "pipeline", "stage")
+            )
+
+            if not deals_to_move:
+                return Response(
+                    {"message": "No valid deals found to move.", "moved_count": 0}
+                )
+
+            moved_count = CRM.objects.filter(id__in=deal_ids).update(stage=target_stage)
+
+            from contacts.models import ContactLog
+
+            log_entries = []
+            for crm in deals_to_move:
+                old_stage_name = crm.stage.name if crm.stage else "No Stage"
+                log_entries.append(
+                    ContactLog(
+                        contact=crm.contact,
+                        crm=crm,
+                        activity_type="Stage Changed",
+                        description=f"Moved from stage '{old_stage_name}' to '{target_stage.name}'",
+                        user=request.user,
+                        pipeline_name=pipeline.name,
+                    )
+                )
+
+            ContactLog.objects.bulk_create(log_entries, batch_size=1000)
+
+            return Response(
+                {
+                    "message": f"Successfully moved {moved_count} deals to stage '{target_stage.name}'.",
+                    "moved_count": moved_count,
+                }
+            )
+        except Stage.DoesNotExist:
+            return Response(
+                {"error": "Target stage not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
     @action(detail=True, methods=["get"])
     def activity(self, request, pk=None):
         """Unified, server-side paginated activity feed for a deal.
