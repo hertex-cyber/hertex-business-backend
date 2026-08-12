@@ -114,7 +114,9 @@ class PipelineViewSet(viewsets.ModelViewSet):
                 pipeline.assigned_user = None
                 pipeline.save(update_fields=["assigned_user"])
 
-        unassigned = CRM.objects.filter(pipeline=pipeline, assigned_user__isnull=True)
+        unassigned = CRM.objects.filter(
+            pipeline=pipeline, assigned_user__isnull=True
+        ).select_related("contact", "assigned_user")
         unassigned_count = unassigned.count()
 
         if unassigned_count == 0:
@@ -206,6 +208,27 @@ class PipelineViewSet(viewsets.ModelViewSet):
 
         # Perform Bulk Update
         CRM.objects.bulk_update(unassigned_list, ["assigned_user"], batch_size=1000)
+
+        # Log assignment changes for triggered deals
+        from contacts.models import ContactLog
+
+        log_entries = []
+        for deal in unassigned_list:
+            if not deal.assigned_user:
+                continue
+            log_entries.append(
+                ContactLog(
+                    contact=deal.contact,
+                    crm=deal,
+                    activity_type="Assignment Changed",
+                    description=f"Assigned to user {deal.assigned_user.first_name} {deal.assigned_user.last_name}".strip()
+                    or deal.assigned_user.email,
+                    user=request.user,
+                    pipeline_name=pipeline.name,
+                )
+            )
+        if log_entries:
+            ContactLog.objects.bulk_create(log_entries, batch_size=1000)
 
         return Response(
             {
