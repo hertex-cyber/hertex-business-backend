@@ -1,4 +1,4 @@
-# CRM Architecture
+# CRM Architectures
 
 ## Overview
 
