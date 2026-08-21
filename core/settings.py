@@ -62,7 +62,6 @@ INSTALLED_APPS = [
     "payments",
     "hr",
     "media",
-    "sales_task_manager",
     "inventory",
     "event_calendar",
     "project_management",

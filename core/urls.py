@@ -19,7 +19,6 @@ urlpatterns = [
     path("api/crm/", include("crm.urls")),
     path("api/payments/", include("payments.urls")),
     path("api/hr/", include("hr.urls")),
-    path("api/sales/", include("sales_task_manager.urls")),
     path("api/", include("media.urls")),
     path("api/inventory/", include("inventory.urls")),
     path("api/calendar/", include("event_calendar.urls")),

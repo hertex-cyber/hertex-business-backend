@@ -319,10 +319,13 @@ class CompanyProfileSerializer(serializers.ModelSerializer):
     def _abs_url(self, field_file):
         if not field_file:
             return None
-        request = self.context.get('request')
-        if request:
-            return request.build_absolute_uri(field_file.url)
-        return field_file.url
+        try:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(field_file.url)
+            return field_file.url
+        except Exception:
+            return None
 
     def get_logo_url(self, obj):
         return self._abs_url(obj.logo)
