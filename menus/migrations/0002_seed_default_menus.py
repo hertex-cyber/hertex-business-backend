@@ -8,21 +8,16 @@ def seed_menus(apps, schema_editor):
         {"code": "dashboard", "name": "Dashboard", "href": "/dashboard", "icon": "LayoutDashboard", "section": "Operations", "order": 1},
         {"code": "contacts", "name": "Contacts", "href": "/contacts", "icon": "Contact", "section": "Operations", "order": 2},
         {"code": "crm", "name": "CRM", "href": "/crm", "icon": "Briefcase", "section": "Operations", "order": 3},
-        {"code": "docs", "name": "Doc Tools", "href": "/docs", "icon": "FileText", "section": "Operations", "order": 4},
+        {"code": "calendar", "name": "Calendar", "href": "/calendar", "icon": "Calendar", "section": "Operations", "order": 4},
         {"code": "inventory", "name": "Inventory", "href": "/inventory/items", "icon": "Box", "section": "Operations", "order": 5},
         {"code": "hr", "name": "HR", "href": "/hr", "icon": "Users", "section": "Operations", "order": 6},
-        {"code": "accounts", "name": "Accounts", "href": "/accounts", "icon": "CreditCard", "section": "Operations", "order": 7},
+        {"code": "work", "name": "HertexFlow Work", "href": "/work", "icon": "Kanban", "section": "Operations", "order": 7},
         {"code": "media", "name": "Media", "href": "/media", "icon": "ImageIcon", "section": "Operations", "order": 8},
-        {"code": "lms", "name": "LMS", "href": "/lms", "icon": "GraduationCap", "section": "Operations", "order": 9},
-        {"code": "sales", "name": "Sales", "href": "/sales", "icon": "TrendingUp", "section": "Operations", "order": 10},
-        {"code": "sales-tasks", "name": "Sales Tasks", "href": "/sales/tasks", "icon": "Target", "section": "Operations", "order": 11},
-        {"code": "sales-targets", "name": "Targets", "href": "/sales/targets", "icon": "Crosshair", "section": "Operations", "order": 12},
         {"code": "invoices", "name": "Invoices", "href": "/invoices", "icon": "FileText", "section": "Operations", "order": 13},
-        {"code": "settings_pref", "name": "Preferences", "href": "/settings", "icon": "Settings", "section": "Settings", "order": 1},
         {"code": "admin", "name": "Admin", "href": "/admin", "icon": "ShieldCheck", "section": "Admin", "order": 1},
     ]
 
-    ALL_ROLES = ["Superadmin", "Admin", "Manager", "Staff", "Vendor", "User"]
+    ALL_ROLES = ["Superadmin", "Admin", "Manager", "Staff", "Vendor", "Finance", "Payroll Executive", "User", "Others"]
     ADMIN_ONLY_ROLES = ["Superadmin", "Admin"]
     ADMIN_ONLY_CODES = {"admin"}
 
